@@ -1,6 +1,6 @@
 # claude-skill-review
 
-A Claude Code skill that performs comprehensive expert-level reviews of an entire codebase — not a branch diff or PR review, but a full assessment of the whole repo.
+A Claude Code skill that performs multi-agent reviews of an entire codebase — not a branch diff or PR review, but a full assessment of the whole repo.
 
 ## Overview
 
