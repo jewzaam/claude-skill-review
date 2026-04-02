@@ -1,6 +1,6 @@
 ---
 name: review
-description: Perform a comprehensive expert-level codebase review by spinning up parallel review agents across multiple dimensions. Use when the user asks to review, assess, audit, or evaluate a codebase or project.
+description: Perform a multi-agent codebase review by spinning up parallel review agents across multiple dimensions. Use when the user asks to review, assess, audit, or evaluate a codebase or project.
 disable-model-invocation: true
 argument-hint: "[path-to-review]"
 ---
@@ -9,7 +9,7 @@ argument-hint: "[path-to-review]"
 
 ## Purpose
 
-Perform a comprehensive expert-level review of a codebase by spinning up parallel review agents across multiple dimensions. Produce a single consolidated review document, then validate it with an independent agent.
+Perform a multi-agent review of a codebase by spinning up parallel review agents across multiple dimensions. Produce a single consolidated review document, then validate it with an independent agent.
 
 ## Constraints
 
