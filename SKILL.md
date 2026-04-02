@@ -1,8 +1,8 @@
 ---
 name: review
-description: Perform a comprehensive expert-level codebase review by spinning up parallel review agents across multiple dimensions. This skill is explicitly user-invoked only — use it when the user directly asks to review, assess, audit, or evaluate a codebase with phrases like "review the code", "assess the codebase", "audit the implementation", "evaluate code quality", or "review this project". Never trigger automatically.
+description: Perform a comprehensive expert-level codebase review by spinning up parallel review agents across multiple dimensions. Use when the user asks to review, assess, audit, or evaluate a codebase or project.
 disable-model-invocation: true
-argument-hint: "[path-to-review] [--focus area1,area2]"
+argument-hint: "[path-to-review]"
 ---
 
 # Review Skill
@@ -40,6 +40,21 @@ Use the `model` parameter on each Agent call to control speed/accuracy tradeoffs
 
 Each agent prompt should include: "Maximize parallel tool calls — when you need to read multiple files or search for multiple patterns, issue all independent Read/Glob/Grep calls in the same message."
 
+#### Confidence & Filtering Rules
+
+All agents (2–5) must self-score each finding's confidence:
+- **High (>80%):** Clear issue with concrete evidence in the code. Report it.
+- **Medium (60–80%):** Plausible issue but requires assumptions. Report only if severity is critical or important.
+- **Low (<60%):** Speculative or theoretical. Drop it — do not include in output.
+
+**Hard exclusions — do not report these regardless of confidence:**
+- Style issues already enforced by project linters or formatters (check for config files like `.flake8`, `pyproject.toml [tool.ruff]`, `.eslintrc`, etc.)
+- Missing tests for trivial code (getters, setters, simple data classes, constants)
+- Architecture concerns in `scripts/`, one-off utilities, or exploratory code
+- Suggestions that repeat what a make target already checks (e.g., don't flag import ordering if `make lint` covers it)
+- Missing docstrings on internal/private functions
+- Generic best-practice advice not grounded in a specific code location
+
 #### Agent 1: Build & Checks
 Run available `make` check targets **sequentially** via Bash and report results. The Bash calls go through normal user permission prompts. Do NOT run `install`, `build`, `run`, `deploy`, or any target that installs or executes the program.
 
@@ -52,8 +67,16 @@ Safe targets to attempt (skip if they don't exist):
 
 Report pass/fail and relevant error output for each target. If a target fails due to missing dependencies, report that — do not install them.
 
+**Output guidelines:** Summarize failures concisely — report the error type and affected files, not full stack traces. Users can rerun targets for full output. For missing-dependency failures, state which dependency is missing and move on.
+
 #### Agent 2: Architecture & Design
-Read-only (Read, Glob, Grep). Assess:
+Read-only (Read, Glob, Grep). Two phases:
+
+**Phase 1 — Establish baseline patterns:** Before assessing issues, identify the project's established architectural patterns: directory layout conventions, module boundary style, how config is handled, what design patterns are already in use. Document these briefly.
+
+**Phase 2 — Assess against baseline:** Evaluate whether the codebase follows its own patterns consistently. Flag deviations from the project's own conventions, not abstract ideals.
+
+Assessment areas:
 - Project structure and organization (files in the right places, logical separation)
 - Module boundaries and coupling (are dependencies between modules appropriate?)
 - Data model design (are dataclasses/models well-defined?)
@@ -63,7 +86,13 @@ Read-only (Read, Glob, Grep). Assess:
 If this is a user-owned repo, also read the relevant standards from `~/source/standards/` (particularly `common/` and any language-specific `project-structure.md`) and check compliance.
 
 #### Agent 3: Implementation Quality
-Read-only (Read, Glob, Grep). Assess:
+Read-only (Read, Glob, Grep). Two phases:
+
+**Phase 1 — Establish baseline patterns:** Before assessing issues, identify the project's established patterns for error handling, type usage, input validation, and resource management. Note how the codebase typically handles these concerns.
+
+**Phase 2 — Assess against baseline:** Evaluate whether the codebase follows its own patterns consistently. Flag deviations and gaps relative to the project's own conventions.
+
+Assessment areas:
 - Code correctness (logic errors, off-by-one, race conditions)
 - Error handling (missing error paths, swallowed exceptions, bare excepts)
 - Type safety (missing annotations, incorrect types, unsafe casts)
@@ -74,7 +103,13 @@ Read-only (Read, Glob, Grep). Assess:
 If this is a user-owned repo, also read the relevant language style standards from `~/source/standards/` (e.g., `python/style.md`, `cli/conventions.md`) and check compliance.
 
 #### Agent 4: Test Quality & Coverage
-Read-only (Read, Glob, Grep). Assess:
+Read-only (Read, Glob, Grep). Two phases:
+
+**Phase 1 — Establish baseline patterns:** Before assessing issues, identify the project's established testing patterns: test framework, fixture conventions, mocking approach, assertion style, and directory structure. Note what the project's tests typically look like.
+
+**Phase 2 — Assess against baseline:** Evaluate whether tests follow the project's own patterns consistently. Flag deviations and gaps relative to established conventions.
+
+Assessment areas:
 - Test plan alignment (do tests match any documented test plan?)
 - Test isolation (proper use of fixtures, no shared state, no network calls)
 - Assertion quality (meaningful assertions, not just "no exception")
@@ -86,7 +121,13 @@ Read-only (Read, Glob, Grep). Assess:
 If this is a user-owned repo, also read the relevant testing standards from `~/source/standards/` (e.g., `python/testing.md`, `cli/testing.md`) and check compliance.
 
 #### Agent 5: Maintainability & Standards
-Read-only (Read, Glob, Grep). Assess:
+Read-only (Read, Glob, Grep). Two phases:
+
+**Phase 1 — Establish baseline patterns:** Before assessing issues, identify the project's established conventions for naming, imports, documentation, and build configuration. Note the project's own style.
+
+**Phase 2 — Assess against baseline:** Evaluate whether the codebase follows its own patterns consistently. Flag internal inconsistencies, not deviations from external style guides.
+
+Assessment areas:
 - Naming conventions (consistent, descriptive, not redundant)
 - Code duplication (DRY violations, copy-paste patterns)
 - Documentation (docstrings present where needed, accurate, not excessive)
@@ -99,7 +140,12 @@ If this is a user-owned repo, also read the relevant standards from `~/source/st
 
 ### 3. Consolidate Review
 
-After all agents complete, synthesize their findings into a single review document. Deduplicate overlapping findings, resolve severity disagreements (take the higher severity when in doubt), and organize by priority.
+After all agents complete, synthesize their findings into a single review document. Deduplicate overlapping findings and organize by priority.
+
+**Deduplication rules:**
+- When two agents flag the same code location, keep the finding from the agent whose review area is the better fit (e.g., a security issue flagged by both Agent 3 and Agent 5 stays under Implementation Quality).
+- When agents disagree on severity, take the higher severity.
+- When merging, preserve the most specific file:line reference and the most actionable suggested fix.
 
 Write the document to `Review-<project-name>.md` at the project root. If a review file already exists, overwrite it.
 
@@ -156,22 +202,34 @@ Write the document to `Review-<project-name>.md` at the project root. If a revie
 
 ### 4. Validate Review
 
-After writing the review document, spawn an independent validation agent (`model: "sonnet"`) that:
+After writing the review document, spawn **parallel** validation subagents (`model: "sonnet"`) — one per severity category that has findings. Each validation subagent prompt must include the project context (language, framework, build system) so it can judge whether findings are reasonable for this type of project.
 
-1. Reads the review document
-2. Spot-checks a sample of findings by reading the referenced source files
-3. Verifies that file:line references are accurate
-4. Checks that severity ratings are justified (critical issues are actually critical, not inflated)
-5. Flags any findings that appear speculative or unsupported by the code
+#### Validation subagent: Critical findings
+- Read the review document and extract all Critical findings
+- For **every** Critical finding, read the referenced source file and line
+- Challenge each finding: Is the issue real? Is the severity justified? Is the file:line reference accurate?
+- Return a list of findings that survived validation and any that should be downgraded or removed, with reasoning
 
-The validation agent appends a brief validation summary to the end of the review document:
+#### Validation subagent: Important findings
+- Same process as Critical, but for all Important findings
+- For **every** Important finding, read the referenced source and challenge it
+- Return validated findings and any that should be downgraded or removed
+
+#### Validation subagent: Suggestions
+- Read the review document and extract all Suggestions
+- Spot-check a sample (at least 50%) by reading the referenced source
+- Remove any that are speculative, already covered by linters, or not grounded in specific code
+- Return the filtered list
+
+After all validation subagents complete, update the review document:
+- Remove findings that failed validation
+- Adjust severity for findings that were downgraded
+- Append a validation summary:
 
 ```markdown
 ## Review Validation
-<Summary of validation checks performed and any corrections made>
+<Number of findings validated, removed, and downgraded, with brief reasoning for any changes>
 ```
-
-If the validation agent finds inaccuracies, correct them in the review document before presenting to the user.
 
 ### 5. Present Summary
 
@@ -196,11 +254,36 @@ Project context:
 - Standards: This is a user-owned repo. Read the relevant standards from ~/source/standards/ for your review area and check compliance.
 </if>
 
+METHODOLOGY — work in two phases:
+
+Phase 1 — Establish baseline patterns:
+Before looking for issues, read enough code to understand the project's established
+patterns for your review area. Document these briefly at the top of your output.
+This grounds your review in the project's own conventions, not abstract ideals.
+
+Phase 2 — Assess against baseline:
+Evaluate whether the codebase follows its own patterns consistently. Flag deviations,
+gaps, and concrete issues relative to established conventions.
+
+CONFIDENCE SCORING — self-score every finding:
+- High (>80%): Clear issue with concrete evidence. Report it.
+- Medium (60-80%): Plausible but requires assumptions. Report only if critical/important.
+- Low (<60%): Speculative. Drop it entirely.
+
+HARD EXCLUSIONS — never report these:
+- Style issues already enforced by project linters/formatters
+- Missing tests for trivial code (getters, setters, simple data classes)
+- Architecture concerns in scripts/ or one-off utilities
+- Issues already caught by make targets
+- Missing docstrings on internal/private functions
+- Generic best-practice advice not grounded in a specific code location
+
 Report findings as a structured list with:
 - Severity: critical / important / suggestion / strength
+- Confidence: high / medium
 - File and line reference (file.py:42)
 - Description of the issue
-- Why it matters
+- Why it matters (grounded in the project's own patterns where possible)
 - Suggested fix (if applicable)
 ```
 
