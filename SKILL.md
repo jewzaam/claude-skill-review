@@ -16,7 +16,7 @@ Perform a multi-agent review of a codebase by spinning up parallel review agents
 - **Read-only analysis.** Never modify source code or tests.
 - **No program execution.** Never install dependencies, run the program, or execute language runtimes directly (no `python`, `node`, `go run`, etc.).
 - **No package management.** Never run `pip`, `npm`, `cargo`, etc.
-- **Output is a single Review markdown file.** The only file this skill creates or overwrites is `Review-<project-name>.md` at the project root.
+- **Output is two Review markdown files** at the project root: `Review-<project-name>.md` (actionable findings) and `Review-<project-name>-supplementary.md` (detailed analysis, strengths, standards). If the user provides constrained context (a PR number, specific area, topic), append a slug (max 12 chars, lowercase, hyphens) to both filenames: `Review-<project-name>-<slug>.md` and `Review-<project-name>-<slug>-supplementary.md`.
 - **If a check requires a tool not present**, note it in the review as a recommendation — do not attempt to install or build it.
 
 ## Process
@@ -147,9 +147,19 @@ After all agents complete, synthesize their findings into a single review docume
 - When agents disagree on severity, take the higher severity.
 - When merging, preserve the most specific file:line reference and the most actionable suggested fix.
 
-Write the document to `Review-<project-name>.md` at the project root. If a review file already exists, overwrite it.
+Write two documents at the project root. If review files already exist, overwrite them. If the user provided constrained context, derive a slug (max 12 chars, lowercase, hyphens) and append it to the filenames.
 
-#### Review Document Structure
+#### Filename examples
+
+| Context | Main file | Supplementary file |
+|---------|-----------|-------------------|
+| No context | `Review-myapp.md` | `Review-myapp-supplementary.md` |
+| `/review PR 565` | `Review-myapp-pr-565.md` | `Review-myapp-pr-565-supplementary.md` |
+| `/review audit module` | `Review-myapp-audit-module.md` | `Review-myapp-audit-module-supplementary.md` |
+
+#### Main document: `Review-<project-name>[-<slug>].md`
+
+Actionable content only — what needs to change and what to do next.
 
 ```markdown
 # Code Review: <project-name>
@@ -169,17 +179,31 @@ Write the document to `Review-<project-name>.md` at the project root. If a revie
 
 ### Critical
 <Issues that must be fixed — bugs, security issues, data loss risks.
- Number each finding with a C prefix: C0, C1, C2, etc.>
+ Number each finding with a C prefix: C0, C1, C2, etc.
+ If none: "No critical issues identified.">
 
 ### Important
 <Issues that should be fixed — error handling gaps, design problems, missing tests.
- Number each finding with an I prefix: I0, I1, I2, etc.>
+ Number each finding with an I prefix: I0, I1, I2, etc.
+ If none: "No important issues identified.">
 
 ### Suggestions
 <Nice-to-haves — style improvements, minor optimizations, documentation.
- Number each finding with an S prefix: S0, S1, S2, etc.>
+ Number each finding with an S prefix: S0, S1, S2, etc.
+ If none: "No suggestions.">
 
-### Strengths
+## Recommendations
+<Prioritized list of actionable next steps>
+```
+
+#### Supplementary document: `Review-<project-name>[-<slug>]-supplementary.md`
+
+Context, analysis, and reference material that supports the main findings.
+
+```markdown
+# Code Review (Supplementary): <project-name>
+
+## Strengths
 <What the codebase does well — good patterns, solid design choices>
 
 ## Detailed Analysis
@@ -198,9 +222,6 @@ Write the document to `Review-<project-name>.md` at the project root. If a revie
 
 ## Standards Compliance
 <If user-owned repo: summary of standards check results. If not user-owned: omit this section.>
-
-## Recommendations
-<Prioritized list of actionable next steps>
 ```
 
 ### 4. Validate Review
@@ -301,4 +322,4 @@ Report findings as a structured list with:
 - **All findings need file:line references** — no vague complaints
 - **Severity must be justified** — explain why something is critical vs. suggestion
 - **Acknowledge strengths** — a good review recognizes what works well
-- **Only write Review-<project-name>.md** — never create or modify any other file
+- **Only write Review-<project-name>[-<slug>].md and its supplementary file** — never create or modify any other file
