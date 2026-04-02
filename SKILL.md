@@ -168,13 +168,16 @@ Write the document to `Review-<project-name>.md` at the project root. If a revie
 ## Findings
 
 ### Critical
-<Issues that must be fixed — bugs, security issues, data loss risks>
+<Issues that must be fixed — bugs, security issues, data loss risks.
+ Number each finding with a C prefix: C0, C1, C2, etc.>
 
 ### Important
-<Issues that should be fixed — error handling gaps, design problems, missing tests>
+<Issues that should be fixed — error handling gaps, design problems, missing tests.
+ Number each finding with an I prefix: I0, I1, I2, etc.>
 
 ### Suggestions
-<Nice-to-haves — style improvements, minor optimizations, documentation>
+<Nice-to-haves — style improvements, minor optimizations, documentation.
+ Number each finding with an S prefix: S0, S1, S2, etc.>
 
 ### Strengths
 <What the codebase does well — good patterns, solid design choices>
