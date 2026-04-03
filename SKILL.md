@@ -30,6 +30,8 @@ Perform a multi-agent review of a codebase by spinning up parallel review agents
 
 **Standards detection:** Read `.git/config` and check the origin remote URL. If the remote is owned by GitHub user `jewzaam` or GitLab user `nmalik`, this is a user-owned repo and agents should check against the coding standards in `~/source/standards/`. Pass the relevant standards context to each agent (see agent prompts below). If the repo is not user-owned, agents should follow the project's own conventions and skip the standards check.
 
+**Allowlist discovery:** Call `mcp__allowlist__get_allowed_permissions` once to discover which commands are pre-approved. Include the allowed commands in each agent's prompt so agents know what they can run without blocking on user approval.
+
 ### 2. Launch All Review Agents in Parallel
 
 Launch **all five** agents simultaneously in a single message using the Agent tool. Each agent produces findings as a structured list.
@@ -56,7 +58,7 @@ All agents (2–5) must self-score each finding's confidence:
 - Generic best-practice advice not grounded in a specific code location
 
 #### Agent 1: Build & Checks
-Run available `make` check targets **sequentially** via Bash and report results. The Bash calls go through normal user permission prompts. Do NOT run `install`, `build`, `run`, `deploy`, or any target that installs or executes the program.
+Run available `make` check targets **sequentially** via Bash and report results. Prefer commands from the provided allowlist to avoid blocking on user approval prompts. Do NOT run `install`, `build`, `run`, `deploy`, or any target that installs or executes the program.
 
 Safe targets to attempt (skip if they don't exist):
 - `make format` (check mode / dry-run if available)
@@ -274,6 +276,7 @@ Project context:
 - Language: <detected>
 - Build system: <detected>
 - Test framework: <detected>
+- Allowed commands: <allowlist from mcp__allowlist__get_allowed_permissions>
 <if user-owned repo>
 - Standards: This is a user-owned repo. Read the relevant standards from ~/source/standards/ for your review area and check compliance.
 </if>
@@ -302,6 +305,12 @@ HARD EXCLUSIONS — never report these:
 - Missing docstrings on internal/private functions
 - Generic best-practice advice not grounded in a specific code location
 
+PROHIBITED ACTIONS:
+- Do NOT write or execute ad hoc tests. If a test is missing, report it as a finding.
+- Do NOT pipe code to a runtime (no `echo "..." | python`, no `python -c`, etc.).
+- Do NOT attempt to verify findings by executing code. Static analysis only.
+- If something needs runtime verification, recommend it as a next step in the review.
+
 Report findings as a structured list with:
 - Severity: critical / important / suggestion / strength
 - Confidence: high / medium
@@ -317,9 +326,13 @@ Report findings as a structured list with:
 - **NEVER install dependencies** — if make targets fail due to missing deps, report it
 - **NEVER run the program** — no `python -m`, `node`, `go run`, etc.
 - **NEVER run pip, npm, cargo, etc.** — no package management
+- **NEVER write or execute ad hoc tests** — if a test is missing, report it as a finding. Do not write a test to prove it is missing. Do not execute code to verify a gap — that is what the missing test is for
+- **NEVER pipe code to a runtime** — no `echo "..." | python`, no `python -c "..."`, no equivalent in any language
 - **Read-only agents (2-5) use Read, Glob, Grep only** — no Bash
 - **Build agent (1) runs only make check targets** — no install, build, run, deploy
+- **Prefer allowlisted commands** — agents receive the allowlist as context. Stick to pre-approved commands to avoid blocking the review on user approval prompts. The goal is a hands-off review that runs without user intervention
 - **All findings need file:line references** — no vague complaints
 - **Severity must be justified** — explain why something is critical vs. suggestion
 - **Acknowledge strengths** — a good review recognizes what works well
 - **Only write Review-<project-name>[-<slug>].md and its supplementary file** — never create or modify any other file
+- **Review is observation, not action** — the review identifies findings and gaps for other agents or the user to act on later. Do not attempt to fix, verify, or validate issues beyond reading source code. If something needs verification beyond static analysis, recommend it as a next step in the review
