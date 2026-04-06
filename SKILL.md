@@ -28,7 +28,11 @@ Perform a multi-agent review of a codebase by spinning up parallel review agents
 - Use Glob and Read to understand the project structure.
 - Identify the language, framework, build system, and test framework.
 
-**Standards detection:** Read `.git/config` and check the origin remote URL. If the remote is owned by GitHub user `jewzaam` or GitLab user `nmalik`, this is a user-owned repo and agents should check against the coding standards in `~/source/standards/`. Pass the relevant standards context to each agent (see agent prompts below). If the repo is not user-owned, agents should follow the project's own conventions and skip the standards check.
+**Standards detection:** Discover local project standards by reading `CLAUDE.md` and `AGENTS.md` at the project root, if they exist. These files define project conventions, coding rules, and behavioral instructions that the review should check against.
+
+Follow explicit file path references found in rules or instructions sections (e.g., "see `docs/contributing.md`", "follow the style guide at `STYLE_GUIDE.md`"). Only follow paths that are clearly pointed to as standards, conventions, or guidelines — ignore casual mentions of source files, config paths, or directories referenced as examples. Follow references up to 2 levels deep (a standards file may reference another, but stop there). Collect all discovered standards into a local standards context and pass relevant portions to each agent — summarize or select sections pertinent to each agent's review area rather than dumping everything.
+
+Additionally, read `.git/config` and check the origin remote URL. If the remote is owned by GitHub user `jewzaam` or GitLab user `nmalik`, this is a user-owned repo and agents should also check against the coding standards in `~/source/standards/`.
 
 **Allowlist discovery:** Call `mcp__allowlist__get_allowed_permissions` once to discover which commands are pre-approved. Include the allowed commands in each agent's prompt so agents know what they can run without blocking on user approval.
 
@@ -85,7 +89,7 @@ Assessment areas:
 - Configuration management (hardcoded values, environment handling)
 - Design patterns used (appropriateness, consistency)
 
-If this is a user-owned repo, also read the relevant standards from `~/source/standards/` (particularly `common/` and any language-specific `project-structure.md`) and check compliance.
+Check compliance against the local project standards provided in your context. If this is a user-owned repo, also read the relevant standards from `~/source/standards/` (particularly `common/` and any language-specific `project-structure.md`) and check compliance.
 
 #### Agent 3: Implementation Quality
 Read-only (Read, Glob, Grep). Two phases:
@@ -102,7 +106,7 @@ Assessment areas:
 - Resource management (file handles, connections, cleanup)
 - Edge cases (empty inputs, None handling, boundary conditions)
 
-If this is a user-owned repo, also read the relevant language style standards from `~/source/standards/` (e.g., `python/style.md`, `cli/conventions.md`) and check compliance.
+Check compliance against the local project standards provided in your context. If this is a user-owned repo, also read the relevant language style standards from `~/source/standards/` (e.g., `python/style.md`, `cli/conventions.md`) and check compliance.
 
 #### Agent 4: Test Quality & Coverage
 Read-only (Read, Glob, Grep). Two phases:
@@ -120,7 +124,7 @@ Assessment areas:
 - Missing test scenarios (what isn't tested that should be?)
 - Fixture design (reusable, minimal, well-named)
 
-If this is a user-owned repo, also read the relevant testing standards from `~/source/standards/` (e.g., `python/testing.md`, `cli/testing.md`) and check compliance.
+Check compliance against the local project standards provided in your context. If this is a user-owned repo, also read the relevant testing standards from `~/source/standards/` (e.g., `python/testing.md`, `cli/testing.md`) and check compliance.
 
 #### Agent 5: Maintainability & Standards
 Read-only (Read, Glob, Grep). Two phases:
@@ -138,7 +142,7 @@ Assessment areas:
 - Consistency (similar patterns handled the same way throughout)
 - Build system (Makefile/pyproject.toml correctness, dependency declarations)
 
-If this is a user-owned repo, also read the relevant standards from `~/source/standards/` (particularly `common/naming.md`, `build/makefile.md`, `common/readme-format.md`) and check compliance. Flag any divergences between the project and the standards.
+Check compliance against the local project standards provided in your context. If this is a user-owned repo, also read the relevant standards from `~/source/standards/` (particularly `common/naming.md`, `build/makefile.md`, `common/readme-format.md`) and check compliance. Flag any divergences between the project and the standards.
 
 ### 3. Consolidate Review
 
@@ -223,7 +227,7 @@ Context, analysis, and reference material that supports the main findings.
 <Consolidated findings from Agent 5>
 
 ## Standards Compliance
-<If user-owned repo: summary of standards check results. If not user-owned: omit this section.>
+<Summary of compliance against local project standards (CLAUDE.md, AGENTS.md, and referenced files). If user-owned repo: also include ~/source/standards/ compliance. Omit this section if no standards files were found.>
 ```
 
 ### 4. Validate Review
@@ -277,8 +281,9 @@ Project context:
 - Build system: <detected>
 - Test framework: <detected>
 - Allowed commands: <allowlist from mcp__allowlist__get_allowed_permissions>
+- Local standards: <relevant standards from CLAUDE.md, AGENTS.md, and referenced files — check compliance for your review area>
 <if user-owned repo>
-- Standards: This is a user-owned repo. Read the relevant standards from ~/source/standards/ for your review area and check compliance.
+- Additional standards: This is a user-owned repo. Also read the relevant standards from ~/source/standards/ for your review area and check compliance.
 </if>
 
 METHODOLOGY — work in two phases:
