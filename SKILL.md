@@ -58,6 +58,9 @@ All agents (2–5) must self-score each finding's confidence:
 - **Medium (60–80%):** Plausible issue but requires assumptions. Report only if severity is critical or important.
 - **Low (<60%):** Speculative or theoretical. Drop it — do not include in output.
 
+**Severity classification — metadata vs. operational issues:**
+Semantically incorrect metadata (type annotations, docstrings, comments) that is not enforced by the project's toolchain and has no runtime impact is a suggestion. Important or higher requires at least one of: the toolchain catches it, or it affects running code.
+
 **Hard exclusions — do not report these regardless of confidence:**
 - Style issues already enforced by project linters or formatters (check for config files like `.flake8`, `pyproject.toml [tool.ruff]`, `.eslintrc`, etc.)
 - Missing tests for trivial code (getters, setters, simple data classes, constants)
@@ -199,8 +202,7 @@ Actionable content only — what needs to change and what to do next.
  If none: "No important issues identified.">
 
 ### Suggestions
-<Nice-to-haves — style improvements, minor optimizations, documentation.
- Number each finding with an S prefix: S0, S1, S2, etc.
+<If suggestions exist: "N suggestions documented in the [supplementary review](Review-<project-name>[-<slug>]-supplementary.md#suggestions)."
  If none: "No suggestions.">
 
 ## Recommendations
@@ -230,6 +232,11 @@ Context, analysis, and reference material that supports the main findings.
 
 ### Maintainability & Standards
 <Consolidated findings from Agent 5>
+
+## Suggestions
+<Nice-to-haves — style improvements, minor optimizations, documentation.
+ Number each finding with an S prefix: S0, S1, S2, etc.
+ If none: omit this section.>
 
 ## Standards Compliance
 <Summary of compliance against local project standards (CLAUDE.md, AGENTS.md, and referenced files). If user-owned repo: also include ~/source/standards/ compliance. Omit this section if no standards files were found.>
@@ -306,6 +313,11 @@ CONFIDENCE SCORING — self-score every finding:
 - High (>80%): Clear issue with concrete evidence. Report it.
 - Medium (60-80%): Plausible but requires assumptions. Report only if critical/important.
 - Low (<60%): Speculative. Drop it entirely.
+
+SEVERITY CLASSIFICATION — metadata vs. operational issues:
+Semantically incorrect metadata (type annotations, docstrings, comments) not enforced by the
+project's toolchain and with no runtime impact → suggestion. Important or higher requires the
+toolchain to catch it OR runtime/behavioral impact.
 
 HARD EXCLUSIONS — never report these:
 - Style issues already enforced by project linters/formatters
