@@ -44,6 +44,11 @@ Use the `model` parameter on each Agent call to control speed/accuracy tradeoffs
 - **Agent 1 (Build & Checks):** `model: "haiku"` — runs commands and reports output; speed matters more than analytical depth.
 - **Agents 2–5 (analytical):** `model: "sonnet"` — good balance of speed and analytical quality.
 
+Use the `subagent_type` parameter to structurally enforce tool restrictions:
+- **Agent 1 (Build & Checks):** default (general-purpose) — needs Bash for make targets.
+- **Agents 2–5 (analytical):** `subagent_type: "feature-dev:code-reviewer"` — Write, Edit, and Bash are structurally unavailable. Agents cannot write files or execute commands even if prompted to. Available tools: Glob, Grep, LS, Read, NotebookRead, WebFetch, TodoWrite, WebSearch.
+- **Validation subagents:** `subagent_type: "feature-dev:code-reviewer"` — same restriction.
+
 Each agent prompt should include: "Maximize parallel tool calls — when you need to read multiple files or search for multiple patterns, issue all independent Read/Glob/Grep calls in the same message."
 
 #### Confidence & Filtering Rules
@@ -232,7 +237,7 @@ Context, analysis, and reference material that supports the main findings.
 
 ### 4. Validate Review
 
-After writing the review document, spawn **parallel** validation subagents (`model: "sonnet"`) — one per severity category that has findings. Each validation subagent prompt must include the project context (language, framework, build system) so it can judge whether findings are reasonable for this type of project.
+After writing the review document, spawn **parallel** validation subagents (`model: "sonnet"`, `subagent_type: "feature-dev:code-reviewer"`) — one per severity category that has findings. Each validation subagent prompt must include the project context (language, framework, build system) so it can judge whether findings are reasonable for this type of project.
 
 #### Validation subagent: Critical findings
 - Read the review document and extract all Critical findings
@@ -333,7 +338,7 @@ Report findings as a structured list with:
 - **NEVER run pip, npm, cargo, etc.** — no package management
 - **NEVER write or execute ad hoc tests** — if a test is missing, report it as a finding. Do not write a test to prove it is missing. Do not execute code to verify a gap — that is what the missing test is for
 - **NEVER pipe code to a runtime** — no `echo "..." | python`, no `python -c "..."`, no equivalent in any language
-- **Read-only agents (2-5) use Read, Glob, Grep only** — no Bash
+- **Read-only agents (2-5) use `subagent_type: "feature-dev:code-reviewer"`** — Write, Edit, and Bash are structurally unavailable via tool restriction, not just prompt prohibition
 - **Build agent (1) runs only make check targets** — no install, build, run, deploy
 - **Prefer allowlisted commands** — agents receive the allowlist as context. Stick to pre-approved commands to avoid blocking the review on user approval prompts. The goal is a hands-off review that runs without user intervention
 - **All findings need file:line references** — no vague complaints
