@@ -52,6 +52,9 @@ With no arguments, it reviews the entire codebase across all dimensions. Any tex
 
 The skill is read-only — it never modifies source code, installs dependencies, or runs the program.
 
-## License
+## Standards reference
 
-GPL-3.0 — see [LICENSE](LICENSE).
+For user-owned repos, the skill also checks against coding standards from `~/source/standards/` if that directory exists. Ownership is determined automatically: the skill compares the origin remote's owner against your authenticated GitHub user (`gh api user --jq '.login'`). If they match and `~/source/standards/` exists, the standards are applied.
+
+The [jewzaam/standards](https://github.com/jewzaam/standards/) repo provides a set of language and project conventions designed for use with this skill. Contributions are welcome — if you have standards that would benefit the broader community, open a PR. To use it, clone it to `~/source/standards/`.
+

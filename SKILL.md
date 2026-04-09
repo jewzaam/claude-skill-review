@@ -3,6 +3,7 @@ name: review
 description: Perform a multi-agent codebase review by spinning up parallel review agents across multiple dimensions. Use when the user asks to review, assess, audit, or evaluate a codebase or project.
 disable-model-invocation: true
 argument-hint: "[path-to-review]"
+allowed-tools: Bash(git remote -v),Bash(bash ~/.claude/skills/review/scripts/standards-check.sh)
 ---
 
 # Review Skill
@@ -19,6 +20,18 @@ Perform a multi-agent review of a codebase by spinning up parallel review agents
 - **Output is two Review markdown files** at the project root: `Review-<project-name>.md` (actionable findings) and `Review-<project-name>-supplementary.md` (detailed analysis, strengths, standards). If the user provides constrained context (a PR number, specific area, topic), append a slug (max 12 chars, lowercase, hyphens) to both filenames: `Review-<project-name>-<slug>.md` and `Review-<project-name>-<slug>-supplementary.md`.
 - **If a check requires a tool not present**, note it in the review as a recommendation — do not attempt to install or build it.
 
+## Pre-Fetch
+
+### Remotes (auto-executed)
+
+!`git remote -v || true`
+
+### Standards Applicability (auto-executed)
+
+Runs `scripts/standards-check.sh`. For user-owned repos (origin owner matches `gh` login and `~/source/standards/` exists), injects the external standards CLAUDE.md with all relative links rewritten to absolute paths (e.g., `common/naming.md` becomes `~/source/standards/common/naming.md`). For non-owned repos, outputs nothing — project standards are already in context via Claude Code.
+
+!`bash ~/.claude/skills/review/scripts/standards-check.sh`
+
 ## Process
 
 ### 1. Determine Scope & Context
@@ -32,7 +45,7 @@ Perform a multi-agent review of a codebase by spinning up parallel review agents
 
 Follow explicit file path references found in rules or instructions sections (e.g., "see `docs/contributing.md`", "follow the style guide at `STYLE_GUIDE.md`"). Only follow paths that are clearly pointed to as standards, conventions, or guidelines — ignore casual mentions of source files, config paths, or directories referenced as examples. Follow references up to 2 levels deep (a standards file may reference another, but stop there). Collect all discovered standards into a local standards context and pass relevant portions to each agent — summarize or select sections pertinent to each agent's review area rather than dumping everything.
 
-Additionally, read `.git/config` and check the origin remote URL. If the remote is owned by GitHub user `jewzaam` or GitLab user `nmalik`, this is a user-owned repo and agents should also check against the coding standards in `~/source/standards/`.
+**External standards:** For user-owned repos, the pre-fetch injects the external standards index with absolute paths directly into context. Pass this content to each agent as part of their prompt — agents can Read any referenced file directly using the absolute paths. For non-owned repos, the pre-fetch outputs nothing and agents rely solely on the project's own CLAUDE.md (already loaded by Claude Code).
 
 **Allowlist discovery:** Call `mcp__allowlist__get_allowed_permissions` once to discover which commands are pre-approved. Include the allowed commands in each agent's prompt so agents know what they can run without blocking on user approval.
 
@@ -97,7 +110,7 @@ Assessment areas:
 - Configuration management (hardcoded values, environment handling)
 - Design patterns used (appropriateness, consistency)
 
-Check compliance against the local project standards provided in your context. If this is a user-owned repo, also read the relevant standards from `~/source/standards/` (particularly `common/` and any language-specific `project-structure.md`) and check compliance.
+Check compliance against the local project standards provided in your context. If external standards were injected, read the relevant files using the absolute paths provided (particularly `common/` and any language-specific `project-structure.md`) and check compliance.
 
 #### Agent 3: Implementation Quality
 Read-only (Read, Glob, Grep). Two phases:
@@ -114,7 +127,7 @@ Assessment areas:
 - Resource management (file handles, connections, cleanup)
 - Edge cases (empty inputs, None handling, boundary conditions)
 
-Check compliance against the local project standards provided in your context. If this is a user-owned repo, also read the relevant language style standards from `~/source/standards/` (e.g., `python/style.md`, `cli/conventions.md`) and check compliance.
+Check compliance against the local project standards provided in your context. If external standards were injected, read the relevant language style files using the absolute paths provided (e.g., `python/style.md`, `cli/conventions.md`) and check compliance.
 
 #### Agent 4: Test Quality & Coverage
 Read-only (Read, Glob, Grep). Two phases:
@@ -132,7 +145,7 @@ Assessment areas:
 - Missing test scenarios (what isn't tested that should be?)
 - Fixture design (reusable, minimal, well-named)
 
-Check compliance against the local project standards provided in your context. If this is a user-owned repo, also read the relevant testing standards from `~/source/standards/` (e.g., `python/testing.md`, `cli/testing.md`) and check compliance.
+Check compliance against the local project standards provided in your context. If external standards were injected, read the relevant testing files using the absolute paths provided (e.g., `python/testing.md`, `cli/testing.md`) and check compliance.
 
 #### Agent 5: Maintainability & Standards
 Read-only (Read, Glob, Grep). Two phases:
@@ -150,7 +163,7 @@ Assessment areas:
 - Consistency (similar patterns handled the same way throughout)
 - Build system (Makefile/pyproject.toml correctness, dependency declarations)
 
-Check compliance against the local project standards provided in your context. If this is a user-owned repo, also read the relevant standards from `~/source/standards/` (particularly `common/naming.md`, `build/makefile.md`, `common/readme-format.md`) and check compliance. Flag any divergences between the project and the standards.
+Check compliance against the local project standards provided in your context. If external standards were injected, read the relevant files using the absolute paths provided (particularly `common/naming.md`, `build/makefile.md`, `common/readme-format.md`) and check compliance. Flag any divergences between the project and the standards.
 
 ### 3. Consolidate Review
 
@@ -239,7 +252,7 @@ Context, analysis, and reference material that supports the main findings.
  If none: omit this section.>
 
 ## Standards Compliance
-<Summary of compliance against local project standards (CLAUDE.md, AGENTS.md, and referenced files). If user-owned repo: also include ~/source/standards/ compliance. Omit this section if no standards files were found.>
+<Summary of compliance against local project standards (CLAUDE.md, AGENTS.md, and referenced files) and any injected external standards. Omit this section if no standards files were found.>
 ```
 
 ### 4. Validate Review
@@ -294,8 +307,8 @@ Project context:
 - Test framework: <detected>
 - Allowed commands: <allowlist from mcp__allowlist__get_allowed_permissions>
 - Local standards: <relevant standards from CLAUDE.md, AGENTS.md, and referenced files — check compliance for your review area>
-<if user-owned repo>
-- Additional standards: This is a user-owned repo. Also read the relevant standards from ~/source/standards/ for your review area and check compliance.
+<if external standards were injected by pre-fetch>
+- External standards: <injected standards content with absolute paths> — read the relevant files for your review area and check compliance.
 </if>
 
 METHODOLOGY — work in two phases:
