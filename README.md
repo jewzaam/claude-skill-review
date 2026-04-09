@@ -16,6 +16,18 @@ Each agent establishes the project's own patterns first, then assesses against t
 
 Output is a single `Review-<project-name>.md` file with prioritized findings (C0, I0, S0 prefixed for easy reference), strengths, and actionable recommendations.
 
+## Dependencies
+
+This skill requires the **feature-dev** Claude Code plugin. Analytical agents (2–5) use `subagent_type: "feature-dev:code-reviewer"` to structurally restrict their available tools to read-only operations (Glob, Grep, Read, etc.) — Bash, Write, and Edit are physically unavailable, not just discouraged by prompt. This is the primary mechanism that enforces the skill's read-only guarantee for code analysis.
+
+Without the plugin installed, agents 2–5 will fail to launch.
+
+The feature-dev plugin is an official Anthropic plugin. To install it:
+
+```
+/plugin install feature-dev@claude-plugins-official
+```
+
 ## Installation
 
 Clone the repo into your Claude Code skills directory:
