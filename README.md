@@ -22,7 +22,7 @@ This skill requires the **feature-dev** Claude Code plugin. Analytical agents (2
 
 Without the plugin installed, agents 2–5 will fail to launch.
 
-The feature-dev plugin is an official Anthropic plugin. To install it:
+The feature-dev plugin is an official Anthropic plugin. Requires Claude Code v2.0 or later (the `/plugin` command is built-in). To install it:
 
 ```
 /plugin install feature-dev@claude-plugins-official
