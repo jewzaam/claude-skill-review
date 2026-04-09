@@ -11,6 +11,10 @@ This repo contains a single Claude Code skill (`SKILL.md`) that performs paralle
 ## Working in this repo
 
 - `SKILL.md` is the only functional file. All changes to the skill go here.
-- The skill is markdown-only — no code, no dependencies, no build system.
+- The skill is markdown-only — no code, no build system.
 - Review output files (`Review-*.md`) are generated in target projects, not in this repo.
 - Follow the skill's own conventions: phased analysis, confidence scoring, severity prefixes (C/I/S).
+
+## Dependencies
+
+The skill requires the **feature-dev** Claude Code plugin (`feature-dev@claude-plugins-official`). Agents 2–5 use `subagent_type: "feature-dev:code-reviewer"` for structural read-only enforcement.
