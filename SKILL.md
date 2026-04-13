@@ -2,8 +2,8 @@
 name: review
 description: Perform a multi-agent codebase review by spinning up parallel review agents across multiple dimensions. Use when the user asks to review, assess, audit, or evaluate a codebase or project.
 disable-model-invocation: true
-argument-hint: "[path-to-review]"
-allowed-tools: Bash(git remote -v),Bash(bash ~/.claude/skills/review/scripts/standards-check.sh)
+argument-hint: "[PR-number]"
+allowed-tools: Bash(git remote -v),Bash(~/.claude/skills/review/scripts/standards-check.sh),Bash(~/.claude/skills/review/scripts/pr-scope.sh *)
 ---
 
 # Review Skill
@@ -30,14 +30,19 @@ Perform a multi-agent review of a codebase by spinning up parallel review agents
 
 Runs `scripts/standards-check.sh`. For user-owned repos (origin owner matches `gh` login and `~/source/standards/` exists), injects the external standards CLAUDE.md with all relative links rewritten to absolute paths (e.g., `common/naming.md` becomes `~/source/standards/common/naming.md`). For non-owned repos, outputs nothing — project standards are already in context via Claude Code.
 
-!`bash ~/.claude/skills/review/scripts/standards-check.sh`
+!`~/.claude/skills/review/scripts/standards-check.sh`
+
+### PR Scope (auto-executed)
+
+If a single numeric argument is provided, computes the changed files against the default branch merge base. Output is injected as PR scope context for diff-scoped reviews. Outputs nothing otherwise.
+
+!`~/.claude/skills/review/scripts/pr-scope.sh $ARGUMENTS`
 
 ## Process
 
 ### 1. Determine Scope & Context
 
-- If an argument is provided, use it as the root path to review.
-- If no argument, use the current working directory.
+- If the pre-fetch injected a "PR Scope" section, include it verbatim in each agent's prompt.
 - Use Glob and Read to understand the project structure.
 - Identify the language, framework, build system, and test framework.
 
@@ -181,8 +186,7 @@ Write two documents at the project root. If review files already exist, overwrit
 | Context | Main file | Supplementary file |
 |---------|-----------|-------------------|
 | No context | `Review-myapp.md` | `Review-myapp-supplementary.md` |
-| `/review PR 565` | `Review-myapp-pr-565.md` | `Review-myapp-pr-565-supplementary.md` |
-| `/review audit module` | `Review-myapp-audit-module.md` | `Review-myapp-audit-module-supplementary.md` |
+| `/review 565` | `Review-myapp-pr-565.md` | `Review-myapp-pr-565-supplementary.md` |
 
 #### Main document: `Review-<project-name>[-<slug>].md`
 
@@ -310,6 +314,7 @@ Project context:
 <if external standards were injected by pre-fetch>
 - External standards: <injected standards content with absolute paths> — read the relevant files for your review area and check compliance.
 </if>
+<include PR Scope output from pre-fetch verbatim, if any>
 
 METHODOLOGY — work in two phases:
 
