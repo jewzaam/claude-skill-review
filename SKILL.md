@@ -1,9 +1,9 @@
 ---
 name: review
-description: Perform a multi-agent codebase review by spinning up parallel review agents across multiple dimensions. Use when the user asks to review, assess, audit, or evaluate a codebase or project.
+description: Perform a multi-agent codebase review by spinning up parallel review agents across multiple dimensions. Use when the user asks to review, assess, audit, or evaluate a codebase or project. Accepts an optional PR number and/or free-form guidance text to focus the review.
 disable-model-invocation: true
-argument-hint: "[PR-number]"
-allowed-tools: Bash(git remote -v),Bash(~/.claude/skills/review/scripts/standards-check.sh),Bash(~/.claude/skills/review/scripts/pr-scope.sh *)
+argument-hint: "[PR-number] [guidance text...]"
+allowed-tools: Bash(git remote -v),Bash(~/.claude/skills/review/scripts/standards-check.sh),Bash(~/.claude/skills/review/scripts/pr-scope.sh *),Bash(~/.claude/skills/review/scripts/guidance.sh *)
 ---
 
 # Review Skill
@@ -34,15 +34,22 @@ Runs `scripts/standards-check.sh`. For user-owned repos (origin owner matches `g
 
 ### PR Scope (auto-executed)
 
-If a single numeric argument is provided, computes the changed files against the default branch merge base. Output is injected as PR scope context for diff-scoped reviews. Outputs nothing otherwise.
+If the first argument is numeric, computes the changed files against the default branch merge base. Output is injected as PR scope context for diff-scoped reviews. Any non-numeric trailing arguments are handled by the User Guidance step below. Outputs nothing if no numeric leading argument is given.
 
-!`~/.claude/skills/review/scripts/pr-scope.sh $ARGUMENTS`
+!`~/.claude/skills/review/scripts/pr-scope.sh "$ARGUMENTS"`
+
+### User Guidance (auto-executed)
+
+Extracts free-form guidance text from the arguments (everything after a leading PR number, or all arguments if none is numeric) and emits it as a "User Guidance" section. The main agent interprets the guidance and decides how it affects the review. Outputs nothing if no guidance is supplied.
+
+!`~/.claude/skills/review/scripts/guidance.sh "$ARGUMENTS"`
 
 ## Process
 
 ### 1. Determine Scope & Context
 
 - If the pre-fetch injected a "PR Scope" section, include it verbatim in each agent's prompt.
+- If the pre-fetch injected a "User Guidance" section, include it verbatim in each agent's prompt. Interpret the guidance yourself — it may be a focus hint, a narrowing filter, a specific question, or arbitrary context. Apply it as the user would reasonably expect.
 - Use Glob and Read to understand the project structure.
 - Identify the language, framework, build system, and test framework.
 
@@ -187,6 +194,8 @@ Write two documents at the project root. If review files already exist, overwrit
 |---------|-----------|-------------------|
 | No context | `Review-myapp.md` | `Review-myapp-supplementary.md` |
 | `/review 565` | `Review-myapp-pr-565.md` | `Review-myapp-pr-565-supplementary.md` |
+| `/review focus on auth` | `Review-myapp-auth.md` | `Review-myapp-auth-supplementary.md` |
+| `/review 565 test coverage` | `Review-myapp-pr-565.md` | `Review-myapp-pr-565-supplementary.md` |
 
 #### Main document: `Review-<project-name>[-<slug>].md`
 
@@ -315,6 +324,7 @@ Project context:
 - External standards: <injected standards content with absolute paths> — read the relevant files for your review area and check compliance.
 </if>
 <include PR Scope output from pre-fetch verbatim, if any>
+<include User Guidance output from pre-fetch verbatim, if any — interpret it as the user would reasonably expect>
 
 METHODOLOGY — work in two phases:
 
