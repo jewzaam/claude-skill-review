@@ -1,9 +1,9 @@
 ---
 name: review
-description: Perform a multi-agent codebase review by spinning up parallel review agents across multiple dimensions. Use when the user asks to review, assess, audit, or evaluate a codebase or project. Accepts an optional PR number and/or free-form guidance text to focus the review.
+description: Perform a multi-agent codebase review by spinning up parallel review agents across multiple dimensions (1 + 7×N agents per run). Use when the user asks to review, assess, audit, or evaluate a codebase or project. Accepts an optional PR number and/or free-form guidance text to focus the review.
 disable-model-invocation: true
 argument-hint: "[PR-number] [guidance text...]"
-allowed-tools: Bash(git remote -v),Bash(~/.claude/skills/review/scripts/standards-check.sh),Bash(~/.claude/skills/review/scripts/pr-scope.sh *),Bash(~/.claude/skills/review/scripts/guidance.sh *)
+allowed-tools: Bash(git remote -v),Bash(~/.claude/skills/review/scripts/standards-check.sh),Bash(~/.claude/skills/review/scripts/pr-scope.sh *),Bash(~/.claude/skills/review/scripts/guidance.sh *),Bash(~/.claude/skills/review/scripts/bootstrap-findings-dir.sh),Bash(python ~/.claude/skills/review/scripts/validate-findings.py *),Bash(python ~/.claude/skills/review/scripts/render-review.py *)
 ---
 
 # Review Skill
@@ -14,10 +14,11 @@ Perform a multi-agent review of a codebase by spinning up parallel review agents
 
 ## Constraints
 
-- **Read-only analysis.** Never modify source code or tests.
-- **No program execution.** Never install dependencies, run the program, or execute language runtimes directly (no `python`, `node`, `go run`, etc.).
+- **Read-only analysis of source code.** Never modify the user's source code or tests.
+- **No program execution.** Never install dependencies, run the program, or execute language runtimes directly (no `python -c`, `node`, `go run`, etc.) against the user's code.
 - **No package management.** Never run `pip`, `npm`, `cargo`, etc.
-- **Output is two Review markdown files** at the project root: `Review-<project-name>.md` (actionable findings) and `Review-<project-name>-supplementary.md` (detailed analysis, strengths, standards). If the user provides constrained context (a PR number, specific area, topic), append a slug (max 12 chars, lowercase, hyphens) to both filenames: `Review-<project-name>-<slug>.md` and `Review-<project-name>-<slug>-supplementary.md`.
+- **Output is two markdown files plus one JSON file** at the project root: `Review-<project-name>.md` (actionable findings), `Review-<project-name>-supplementary.md` (detailed analysis, strengths, decomposition), and `Review-<project-name>.json` (structured findings for downstream skills). If the user provides constrained context (a PR number, specific area, topic), append a slug (max 12 chars, lowercase, hyphens) to all three filenames.
+- **Intermediate workspace is `.tmp-review-findings/` at the project root** — created by the bootstrap pre-fetch, contains a `.gitignore` of `*` so it is never committed. Holds raw per-agent JSON, the consolidated set, and validation batches.
 - **If a check requires a tool not present**, note it in the review as a recommendation — do not attempt to install or build it.
 
 ## Pre-Fetch
@@ -31,6 +32,12 @@ Perform a multi-agent review of a codebase by spinning up parallel review agents
 Runs `scripts/standards-check.sh`. For user-owned repos (origin owner matches `gh` login and `~/source/standards/` exists), injects the external standards CLAUDE.md with all relative links rewritten to absolute paths (e.g., `common/naming.md` becomes `~/source/standards/common/naming.md`). For non-owned repos, outputs nothing — project standards are already in context via Claude Code.
 
 !`~/.claude/skills/review/scripts/standards-check.sh`
+
+### Findings Workspace Bootstrap (auto-executed)
+
+Creates `.tmp-review-findings/` at the project root with `raw/`, `validation/`, and a `.gitignore` of `*`. Idempotent — safe to run on every invocation. Sub-agents and the main agent both write JSON into this tree.
+
+!`~/.claude/skills/review/scripts/bootstrap-findings-dir.sh`
 
 ### PR Scope (auto-executed)
 
@@ -61,328 +68,267 @@ Follow explicit file path references found in rules or instructions sections (e.
 
 **Allowlist discovery:** Call `mcp__allowlist__get_allowed_permissions` once to discover which commands are pre-approved. Include the allowed commands in each agent's prompt so agents know what they can run without blocking on user approval.
 
-### 2. Launch All Review Agents in Parallel
+### 2. Decompose Scope into Dimensions
 
-Launch **all five** agents simultaneously in a single message using the Agent tool. Each agent produces findings as a structured list.
+A **dimension** is a coherent slice of the review scope handed to a set of review agents. Decomposition decides how the work is sliced before any agent is dispatched.
 
-Use the `model` parameter on each Agent call to control speed/accuracy tradeoffs:
-- **Agent 1 (Build & Checks):** `model: "haiku"` — runs commands and reports output; speed matters more than analytical depth.
-- **Agents 2–5 (analytical):** `model: "sonnet"` — good balance of speed and analytical quality.
+**What can count as a dimension** (these are examples — pick whatever shape best matches the scope; do not feel obligated to use any specific one):
+- A directory or sub-tree
+- A package or module
+- A logical theme (e.g., "auth", "data ingestion", "config layer")
+- A cross-cutting concern (e.g., "security across all routes", "all CLI entry points")
+- A single file *only when the entire scope is 1–2 files*; do not split a larger scope into one-dimension-per-file (that explodes agent counts without value)
 
-Use the `subagent_type` parameter to structurally enforce tool restrictions:
-- **Agent 1 (Build & Checks):** default (general-purpose) — needs Bash for make targets.
-- **Agents 2–5 (analytical):** `subagent_type: "feature-dev:code-reviewer"` — Write, Edit, and Bash are structurally unavailable. Agents cannot write files or execute commands even if prompted to. Available tools: Glob, Grep, LS, Read, NotebookRead, WebFetch, TodoWrite, WebSearch.
-- **Validation subagents:** `subagent_type: "feature-dev:code-reviewer"` — same restriction.
+**Decomposition rules:**
+- **Default to decomposing.** For any meaningful scope, identify multiple dimensions. The only exception: when the scope is 1–2 files (a tiny PR or a single-file review), a single dimension covering them is acceptable — do not artificially split.
+- **No cap on dimension count.** Large repos may produce 10+ dimensions and dozens of agents. Token cost is the explicit trade-off; the user has opted in.
+- **Overlap is allowed.** Dimensions may overlap (e.g., a per-package dim plus a cross-cutting "security" dim). Consolidation deduplicates findings.
+- **PR-scoped reviews:** derive dimensions from the changed file set. **Full-repo reviews:** derive from the project structure.
+- For each dimension produce: a short human-readable name (e.g., `"auth subsystem"`), a filesystem-safe slug (lowercase, hyphens, ≤30 chars), and a `dimension_scope` object describing what the agent will review (e.g., `{"paths": ["src/auth/"]}` or `{"theme": "all CLI entry points", "paths": ["src/cli/"]}`).
+- Record the full dimension list — you will write it into the supplementary review file at the render step.
 
-Each agent prompt should include: "Maximize parallel tool calls — when you need to read multiple files or search for multiple patterns, issue all independent Read/Glob/Grep calls in the same message."
+### 3. Dispatch the Review Agent Matrix
 
-#### Confidence & Filtering Rules
+After decomposition produces N dimensions, launch **all `1 + 7×N` agents in a single parallel message** using the Agent tool.
 
-All agents (2–5) must self-score each finding's confidence:
-- **High (>80%):** Clear issue with concrete evidence in the code. Report it.
-- **Medium (60–80%):** Plausible issue but requires assumptions. Report only if severity is critical or important.
-- **Low (<60%):** Speculative or theoretical. Drop it — do not include in output.
+- **1 × Build & Checks agent** (global, runs once)
+- **For each dimension:** 7 concern agents — one per concern axis below
 
-**Severity classification — metadata vs. operational issues:**
-Semantically incorrect metadata (type annotations, docstrings, comments) that is not enforced by the project's toolchain and has no runtime impact is a suggestion. Important or higher requires at least one of: the toolchain catches it, or it affects running code.
+#### Build & Checks Agent
 
-**Hard exclusions — do not report these regardless of confidence:**
-- Style issues already enforced by project linters or formatters (check for config files like `.flake8`, `pyproject.toml [tool.ruff]`, `.eslintrc`, etc.)
+- `model: "haiku"`, default subagent_type
+- Runs available `make` check targets sequentially via Bash and reports pass/fail. Prefer commands from the provided allowlist.
+- Safe targets to attempt (skip if missing): `make format` (check mode), `make lint`, `make typecheck`, `make test` or `make test-unit`, `make coverage`.
+- Do **not** run `install`, `build`, `run`, `deploy`, or any target that installs or executes the program.
+- **Output guidelines:** summarize failures concisely — error type and affected files, not full stack traces. For missing-dependency failures, state which dependency is missing and move on.
+
+#### Concern Axes (per dimension)
+
+| # | Concern (`concern`) | `concern_slug` | Model | Scope |
+|---|---|---|---|---|
+| 1 | Architecture & Design | `architecture` | sonnet | Project structure, module boundaries, coupling, data model, configuration management, design pattern consistency. |
+| 2 | Implementation Quality | `implementation` | sonnet | Logic correctness, error handling, type safety, resource management, edge cases, concurrency. **Security excluded — see dedicated axis.** |
+| 3 | Test Quality & Coverage | `test` | sonnet | Test plan alignment, isolation, assertion quality, edge case coverage, mock usage, missing scenarios, fixture design. |
+| 4 | Maintainability & Standards | `maintainability` | haiku | Naming, duplication, import organization, function complexity, internal consistency, build system. **Documentation excluded — see dedicated axis.** |
+| 5 | Security | `security` | sonnet | Authn/authz, input validation, injection vectors, credential/secret handling, path traversal, deserialization, supply chain (deps), TLS/crypto, auth-related error leakage. |
+| 6 | Documentation | `documentation` | haiku | README accuracy and completeness, docstrings, inline comments where non-obvious, examples, ADRs, changelog, public API docs, install/usage instructions. |
+| 7 | Observability | `observability` | sonnet | Log quality (levels, structured fields, sensitive data), error context (do exceptions carry enough info?), metrics, traces, debug affordances, alerting hooks. |
+
+#### Subagent Type and Tool Restrictions
+
+All seven concern agents use `subagent_type: "general-purpose"`. They need both Write (to put their JSON output on disk) and Bash (to invoke `validate-findings.py`) to self-validate against the schema. The prompt restricts them as follows:
+
+- **Pre-assigned output path:** each agent is told its single allowed Write target (`.tmp-review-findings/raw/<concern_slug>-<dimension_slug>.json`). Any Write to any other path is a violation.
+- **Bash restricted to one command pattern:** invoking `validate-findings.py` against that exact output path. No other Bash usage is permitted.
+- **Edit, NotebookEdit, and any other state-modifying tool are prohibited.**
+- The agent must stop and report if asked or tempted to deviate.
+
+#### Methodology (per concern agent)
+
+Each concern agent operates in two phases within its dimension scope:
+1. **Establish baseline patterns:** read enough code in scope to understand the project's existing conventions for this concern. This grounds the review in the project's own patterns, not abstract ideals.
+2. **Assess against baseline:** flag deviations and gaps. Score each finding numerically.
+
+#### Scoring (per finding)
+
+Each finding is scored on four integer scales (0–100). Names match the JSON schema fields exactly:
+
+- `impact` — how bad if the issue manifests / blast radius.
+- `likelihood` — probability the issue actually occurs in real use.
+- `effort_to_fix` — rough cost (lower = cheaper). Helps downstream tools prioritize quick wins.
+- `confidence` — the agent's certainty that this is a real issue with concrete evidence.
+
+**Sub-agents do not drop low-confidence findings.** Every finding the agent identifies enters the pipeline. Validators may rescore later (including increasing confidence); the render step segregates low-confidence items into the `needs-review` bucket.
+
+The `agent-output` schema does not include `severity` or `id` fields — the schema rejects either. Severity buckets and IDs are computed at the render step from the numerical scores; sub-agents do not need to think about them.
+
+#### Hard Exclusions — Do Not Report
+
+- Style issues already enforced by project linters or formatters (check for `.flake8`, `pyproject.toml [tool.ruff]`, `.eslintrc`, etc.)
 - Missing tests for trivial code (getters, setters, simple data classes, constants)
 - Architecture concerns in `scripts/`, one-off utilities, or exploratory code
-- Suggestions that repeat what a make target already checks (e.g., don't flag import ordering if `make lint` covers it)
+- Suggestions that repeat what a make target already checks
 - Missing docstrings on internal/private functions
 - Generic best-practice advice not grounded in a specific code location
 
-#### Agent 1: Build & Checks
-Run available `make` check targets **sequentially** via Bash and report results. Prefer commands from the provided allowlist to avoid blocking on user approval prompts. Do NOT run `install`, `build`, `run`, `deploy`, or any target that installs or executes the program.
+### 4. Re-Validate Per-Agent JSON
 
-Safe targets to attempt (skip if they don't exist):
-- `make format` (check mode / dry-run if available)
-- `make lint`
-- `make typecheck`
-- `make test` or `make test-unit`
-- `make coverage`
-
-Report pass/fail and relevant error output for each target. If a target fails due to missing dependencies, report that — do not install them.
-
-**Output guidelines:** Summarize failures concisely — report the error type and affected files, not full stack traces. Users can rerun targets for full output. For missing-dependency failures, state which dependency is missing and move on.
-
-#### Agent 2: Architecture & Design
-Read-only (Read, Glob, Grep). Two phases:
-
-**Phase 1 — Establish baseline patterns:** Before assessing issues, identify the project's established architectural patterns: directory layout conventions, module boundary style, how config is handled, what design patterns are already in use. Document these briefly.
-
-**Phase 2 — Assess against baseline:** Evaluate whether the codebase follows its own patterns consistently. Flag deviations from the project's own conventions, not abstract ideals.
-
-Assessment areas:
-- Project structure and organization (files in the right places, logical separation)
-- Module boundaries and coupling (are dependencies between modules appropriate?)
-- Data model design (are dataclasses/models well-defined?)
-- Configuration management (hardcoded values, environment handling)
-- Design patterns used (appropriateness, consistency)
-
-Check compliance against the local project standards provided in your context. If external standards were injected, read the relevant files using the absolute paths provided (particularly `common/` and any language-specific `project-structure.md`) and check compliance.
-
-#### Agent 3: Implementation Quality
-Read-only (Read, Glob, Grep). Two phases:
-
-**Phase 1 — Establish baseline patterns:** Before assessing issues, identify the project's established patterns for error handling, type usage, input validation, and resource management. Note how the codebase typically handles these concerns.
-
-**Phase 2 — Assess against baseline:** Evaluate whether the codebase follows its own patterns consistently. Flag deviations and gaps relative to the project's own conventions.
-
-Assessment areas:
-- Code correctness (logic errors, off-by-one, race conditions)
-- Error handling (missing error paths, swallowed exceptions, bare excepts)
-- Type safety (missing annotations, incorrect types, unsafe casts)
-- Security (path traversal, injection, credential handling)
-- Resource management (file handles, connections, cleanup)
-- Edge cases (empty inputs, None handling, boundary conditions)
-
-Check compliance against the local project standards provided in your context. If external standards were injected, read the relevant language style files using the absolute paths provided (e.g., `python/style.md`, `cli/conventions.md`) and check compliance.
-
-#### Agent 4: Test Quality & Coverage
-Read-only (Read, Glob, Grep). Two phases:
-
-**Phase 1 — Establish baseline patterns:** Before assessing issues, identify the project's established testing patterns: test framework, fixture conventions, mocking approach, assertion style, and directory structure. Note what the project's tests typically look like.
-
-**Phase 2 — Assess against baseline:** Evaluate whether tests follow the project's own patterns consistently. Flag deviations and gaps relative to established conventions.
-
-Assessment areas:
-- Test plan alignment (do tests match any documented test plan?)
-- Test isolation (proper use of fixtures, no shared state, no network calls)
-- Assertion quality (meaningful assertions, not just "no exception")
-- Edge case coverage (error paths, empty inputs, boundary conditions)
-- Mock usage (appropriate mocking, not over-mocking)
-- Missing test scenarios (what isn't tested that should be?)
-- Fixture design (reusable, minimal, well-named)
-
-Check compliance against the local project standards provided in your context. If external standards were injected, read the relevant testing files using the absolute paths provided (e.g., `python/testing.md`, `cli/testing.md`) and check compliance.
-
-#### Agent 5: Maintainability & Standards
-Read-only (Read, Glob, Grep). Two phases:
-
-**Phase 1 — Establish baseline patterns:** Before assessing issues, identify the project's established conventions for naming, imports, documentation, and build configuration. Note the project's own style.
-
-**Phase 2 — Assess against baseline:** Evaluate whether the codebase follows its own patterns consistently. Flag internal inconsistencies, not deviations from external style guides.
-
-Assessment areas:
-- Naming conventions (consistent, descriptive, not redundant)
-- Code duplication (DRY violations, copy-paste patterns)
-- Documentation (docstrings present where needed, accurate, not excessive)
-- Import organization (grouped, sorted, no unused)
-- Function complexity (too long, too many parameters, deeply nested)
-- Consistency (similar patterns handled the same way throughout)
-- Build system (Makefile/pyproject.toml correctness, dependency declarations)
-
-Check compliance against the local project standards provided in your context. If external standards were injected, read the relevant files using the absolute paths provided (particularly `common/naming.md`, `build/makefile.md`, `common/readme-format.md`) and check compliance. Flag any divergences between the project and the standards.
-
-### 3. Consolidate Review
-
-After all agents complete, synthesize their findings into a single review document. Deduplicate overlapping findings and organize by priority.
-
-**Deduplication rules:**
-- When two agents flag the same code location, keep the finding from the agent whose review area is the better fit (e.g., a security issue flagged by both Agent 3 and Agent 5 stays under Implementation Quality).
-- When agents disagree on severity, take the higher severity.
-- When merging, preserve the most specific file:line reference and the most actionable suggested fix.
-
-Write two documents at the project root. If review files already exist, overwrite them. If the user provided constrained context, derive a slug (max 12 chars, lowercase, hyphens) and append it to the filenames.
-
-#### Filename examples
-
-| Context | Main file | Supplementary file |
-|---------|-----------|-------------------|
-| No context | `Review-myapp.md` | `Review-myapp-supplementary.md` |
-| `/review 565` | `Review-myapp-pr-565.md` | `Review-myapp-pr-565-supplementary.md` |
-| `/review focus on auth` | `Review-myapp-auth.md` | `Review-myapp-auth-supplementary.md` |
-| `/review 565 test coverage` | `Review-myapp-pr-565.md` | `Review-myapp-pr-565-supplementary.md` |
-
-#### Main document: `Review-<project-name>[-<slug>].md`
-
-Actionable content only — what needs to change and what to do next.
-
-```markdown
-# Code Review: <project-name>
-
-## TL;DR
-<3-5 sentence executive summary with overall assessment>
-
-## Build & Check Results
-
-| Target | Status | Notes |
-|--------|--------|-------|
-| format | ✅/❌/⚠️ | ... |
-| lint   | ✅/❌/⚠️ | ... |
-| ...    | ...    | ... |
-
-## Findings
-
-### Critical
-<Issues that must be fixed — bugs, security issues, data loss risks.
- Number each finding with a C prefix: C0, C1, C2, etc.
- If none: "No critical issues identified.">
-
-### Important
-<Issues that should be fixed — error handling gaps, design problems, missing tests.
- Number each finding with an I prefix: I0, I1, I2, etc.
- If none: "No important issues identified.">
-
-### Suggestions
-<If suggestions exist: "N suggestions documented in the [supplementary review](Review-<project-name>[-<slug>]-supplementary.md#suggestions)."
- If none: "No suggestions.">
-
-## Recommendations
-<Prioritized list of actionable next steps>
-```
-
-#### Supplementary document: `Review-<project-name>[-<slug>]-supplementary.md`
-
-Context, analysis, and reference material that supports the main findings.
-
-```markdown
-# Code Review (Supplementary): <project-name>
-
-## Strengths
-<What the codebase does well — good patterns, solid design choices>
-
-## Detailed Analysis
-
-### Architecture & Design
-<Consolidated findings from Agent 2>
-
-### Implementation Quality
-<Consolidated findings from Agent 3>
-
-### Test Quality & Coverage
-<Consolidated findings from Agent 4>
-
-### Maintainability & Standards
-<Consolidated findings from Agent 5>
-
-## Suggestions
-<Nice-to-haves — style improvements, minor optimizations, documentation.
- Number each finding with an S prefix: S0, S1, S2, etc.
- If none: omit this section.>
-
-## Standards Compliance
-<Summary of compliance against local project standards (CLAUDE.md, AGENTS.md, and referenced files) and any injected external standards. Omit this section if no standards files were found.>
-```
-
-### 4. Validate Review
-
-After writing the review document, spawn **parallel** validation subagents (`model: "sonnet"`, `subagent_type: "feature-dev:code-reviewer"`) — one per severity category that has findings. Each validation subagent prompt must include the project context (language, framework, build system) so it can judge whether findings are reasonable for this type of project.
-
-#### Validation subagent: Critical findings
-- Read the review document and extract all Critical findings
-- For **every** Critical finding, read the referenced source file and line
-- Challenge each finding: Is the issue real? Is the severity justified? Is the file:line reference accurate?
-- Return a list of findings that survived validation and any that should be downgraded or removed, with reasoning
-
-#### Validation subagent: Important findings
-- Same process as Critical, but for all Important findings
-- For **every** Important finding, read the referenced source and challenge it
-- Return validated findings and any that should be downgraded or removed
-
-#### Validation subagent: Suggestions
-- Read the review document and extract all Suggestions
-- Spot-check a sample (at least 50%) by reading the referenced source
-- Remove any that are speculative, already covered by linters, or not grounded in specific code
-- Return the filtered list
-
-After all validation subagents complete, update the review document:
-- Remove findings that failed validation
-- Adjust severity for findings that were downgraded
-- Append a validation summary:
-
-```markdown
-## Review Validation
-<Number of findings validated, removed, and downgraded, with brief reasoning for any changes>
-```
-
-### 5. Present Summary
-
-After validation, present the TL;DR and critical/important findings directly to the user. Reference the review document for full details.
-
-## Agent Prompt Template
-
-Each read-only review agent should receive a prompt structured as:
+After every concern agent returns, re-run the validator as defense-in-depth:
 
 ```
-Review the project at <root-path> focusing on <review-area>.
+python ~/.claude/skills/review/scripts/validate-findings.py .tmp-review-findings/raw/<concern_slug>-<dimension_slug>.json
+```
 
-Read all relevant source files. Use Glob to find files and Grep to search for patterns.
-Maximize parallel tool calls — issue all independent Read/Glob/Grep calls in the same message.
-Do NOT run any commands. Do NOT modify any files. Read-only analysis only.
+For any file that fails this re-validation, exclude it from consolidation and log a warning in the supplementary "Decomposition" preamble (you will write that preamble at render time). Do not re-dispatch — sub-agents already had three attempts.
 
-Project context:
+### 5. Consolidate
+
+Read every `*.json` under `.tmp-review-findings/raw/`, then build `consolidated.json`:
+
+- **Group by `(concern_slug, primary location)`.** The primary location is the first entry in `finding.locations` whose `role` is `primary` (or whose `role` is absent — defaulted to primary).
+- **Within each group, merge:**
+  - Union `finding.locations` (deduplicate by `path` + `line`).
+  - Keep the longest non-trivial `suggested_fix` (tie-break by source agent ordering).
+  - Take the **maximum** of `impact`, `likelihood`, and `confidence` across the group.
+  - Take the **minimum** of `effort_to_fix` (cheapest fix wins).
+  - Set `source_dimensions` = sorted union of contributing `dimension_slug` values.
+  - Compute `content_hash` = stable hex hash (e.g., truncated SHA-256, 16+ chars) over `(concern_slug, dimension_slug of first contributor, primary location path:line, title)`.
+- **Cross-cutting merge.** Within a single `concern_slug`, group remaining findings by title similarity (Jaccard over title tokens, threshold ~0.7) and merge near-duplicates with the same numerical aggregation rules.
+- **Do NOT assign IDs.** Do NOT assign severity buckets.
+- Validate the result: `python ~/.claude/skills/review/scripts/validate-findings.py .tmp-review-findings/consolidated.json`.
+
+The consolidated `decomposition` field copies the dimension list you produced in step 2.
+
+### 6. Validate Findings
+
+Slice `consolidated.json` into batches:
+
+- Sort `consolidated.findings` by `priority` (= `impact * likelihood / 100`) descending.
+- Slice into batches of **at most 8 findings** each.
+- For each batch, write `.tmp-review-findings/validation/batch-<N>-input.json` containing `{batch_number, total_batches, findings: [...]}`. Each finding object also carries its `index` (its position in `consolidated.findings`) so the validator can reference it back.
+- Validate each input file: `python ~/.claude/skills/review/scripts/validate-findings.py .tmp-review-findings/validation/batch-<N>-input.json`.
+
+Spawn `total_batches` validator agents in **parallel** in a single message:
+
+- `model: "sonnet"`, `subagent_type: "feature-dev:code-reviewer"` (read-only structurally).
+- Each validator opens the cited `finding.locations`, challenges accuracy and the four numerical scores, and returns a JSON object matching `validation-output.schema.json` directly in its response.
+- Each verdict is one of:
+  - `"action": "confirm"` — finding stands as-is.
+  - `"action": "rescore"` — provide `new_scores` with any subset of the four fields. Validators may *increase* `confidence` if they find stronger evidence.
+  - `"action": "remove"` — finding is wrong (e.g., cited line does not exist, issue is not real).
+- Each verdict carries `finding_ref: {index, content_hash}` so the main agent can detect array drift.
+
+After each validator returns, write its response to `.tmp-review-findings/validation/batch-<N>-output.json` and re-validate it against `validation-output.schema.json`.
+
+### 7. Apply Verdicts and Render
+
+Apply verdicts to `consolidated.json` in memory:
+
+- For each verdict, look up the finding by `index` and confirm `content_hash` matches. If the hash mismatches, log the discrepancy and skip the verdict (do not mutate the wrong finding).
+- `"confirm"`: no change.
+- `"rescore"`: shallow-merge `new_scores` into the finding's numerical fields.
+- `"remove"`: drop the finding from the list.
+- Findings with low `confidence` are kept; the renderer segregates them.
+
+Write the post-validation findings to a temp file (e.g., `.tmp-review-findings/post-validation.json`, same shape as `consolidated.json`) and run the renderer:
+
+```
+python ~/.claude/skills/review/scripts/render-review.py \
+  --input .tmp-review-findings/post-validation.json \
+  --config ~/.claude/skills/review/schemas/render-config.default.json \
+  --out-dir <project root> \
+  --project-name <project name> \
+  --scope-slug <slug if PR-number or guidance constrained scope, else empty>
+```
+
+The renderer:
+- Maps each finding to a severity bucket (`critical | important | suggestion | needs-review`) using the threshold config.
+- Assigns IDs in stable per-bucket order: `C0..`, `I0..`, `S0..`, `N0..`.
+- Writes the final JSON (`Review-<project-name>[-<slug>].json`) and the two markdown files (`Review-<project-name>[-<slug>].md` + `-supplementary.md`) at `--out-dir`.
+
+The slug derivation from `/review` arguments matches today's behavior (max 12 chars, lowercase, hyphens; appended when scope is constrained by PR number or guidance text). Pre-existing PR-scope and user-guidance pre-fetch outputs supply the source material.
+
+### 8. Present Summary
+
+After rendering, present the TL;DR plus the Critical and Important findings inline to the user. Reference the main markdown file for full details and the supplementary file for analysis, suggestions, and needs-review items. Reference the JSON file for downstream tooling.
+
+## Sub-Agent Prompt Template (concern agents)
+
+Each of the seven concern agents per dimension receives a prompt structured as follows:
+
+```
+You are reviewing the project at <root-path> for the **<concern>** axis within the dimension **<dimension_name>** (slug: <dimension_slug>).
+
+DIMENSION SCOPE (confine your review to this):
+<JSON object: file list, directory paths, or theme description>
+
+If you notice issues clearly outside this scope, list them under `cross_cutting_observations` in your output but do not investigate deeply.
+
+OUTPUT PATH (your single allowed Write target):
+.tmp-review-findings/raw/<concern_slug>-<dimension_slug>.json
+
+TOOL RESTRICTIONS — strictly enforced:
+- Write: only to the OUTPUT PATH above. Any Write elsewhere is a violation; stop and report.
+- Bash: only to invoke `python ~/.claude/skills/review/scripts/validate-findings.py <OUTPUT PATH>`. No other Bash usage is permitted.
+- Edit, NotebookEdit, or any other state-modifying tool: prohibited.
+- Read, Glob, Grep, LS, NotebookRead, WebFetch, TodoWrite, WebSearch: allowed.
+
+PROJECT CONTEXT:
 - Language: <detected>
 - Build system: <detected>
 - Test framework: <detected>
 - Allowed commands: <allowlist from mcp__allowlist__get_allowed_permissions>
-- Local standards: <relevant standards from CLAUDE.md, AGENTS.md, and referenced files — check compliance for your review area>
-<if external standards were injected by pre-fetch>
-- External standards: <injected standards content with absolute paths> — read the relevant files for your review area and check compliance.
+- Local standards: <relevant standards from CLAUDE.md, AGENTS.md, and referenced files>
+<if external standards were injected>
+- External standards: <injected content with absolute paths> — read the relevant files for your axis and check compliance.
 </if>
-<include PR Scope output from pre-fetch verbatim, if any>
-<include User Guidance output from pre-fetch verbatim, if any — interpret it as the user would reasonably expect>
+<include PR Scope output verbatim, if any>
+<include User Guidance output verbatim, if any>
 
-METHODOLOGY — work in two phases:
-
+METHODOLOGY:
 Phase 1 — Establish baseline patterns:
-Before looking for issues, read enough code to understand the project's established
-patterns for your review area. Document these briefly at the top of your output.
-This grounds your review in the project's own conventions, not abstract ideals.
+Read enough code in scope to understand the project's existing conventions for the <concern> axis. This grounds the review in the project's own patterns.
 
 Phase 2 — Assess against baseline:
-Evaluate whether the codebase follows its own patterns consistently. Flag deviations,
-gaps, and concrete issues relative to established conventions.
+Evaluate whether the codebase follows its own patterns consistently. Flag deviations, gaps, and concrete issues. For each finding, fill all required fields per the agent-output schema.
 
-CONFIDENCE SCORING — self-score every finding:
-- High (>80%): Clear issue with concrete evidence. Report it.
-- Medium (60-80%): Plausible but requires assumptions. Report only if critical/important.
-- Low (<60%): Speculative. Drop it entirely.
+SCORING — every finding requires four integer scores (0–100):
+- impact: blast radius if the issue manifests
+- likelihood: probability the issue actually occurs in real use
+- effort_to_fix: lower = cheaper to fix
+- confidence: your certainty this is a real issue with concrete evidence
 
-SEVERITY CLASSIFICATION — metadata vs. operational issues:
-Semantically incorrect metadata (type annotations, docstrings, comments) not enforced by the
-project's toolchain and with no runtime impact → suggestion. Important or higher requires the
-toolchain to catch it OR runtime/behavioral impact.
+Do NOT drop low-confidence findings. Validators downstream may rescore; the render step segregates low-confidence items into a `needs-review` bucket.
 
-HARD EXCLUSIONS — never report these:
-- Style issues already enforced by project linters/formatters
-- Missing tests for trivial code (getters, setters, simple data classes)
-- Architecture concerns in scripts/ or one-off utilities
+The `agent_output` schema does not include `severity` or `id` fields — do not invent them. The render step assigns both from your numerical scores.
+
+LOCATIONS — every finding requires at least one entry:
+- Use file:line or file:line-range under finding.locations[].path / .line.
+- For "X is missing" findings, cite the spec/plan/standards file:line where the requirement is stated, with role: "requirement".
+- Multiple locations are allowed; mark non-primary entries with role: "related" | "callsite" | "requirement".
+
+HARD EXCLUSIONS — never report:
+- Style issues already enforced by linters/formatters
+- Missing tests for trivial code (getters/setters/data classes)
+- Architecture concerns in `scripts/` or one-off utilities
 - Issues already caught by make targets
-- Missing docstrings on internal/private functions
+- Missing docstrings on private functions
 - Generic best-practice advice not grounded in a specific code location
 
 PROHIBITED ACTIONS:
-- Do NOT write or execute ad hoc tests. If a test is missing, report it as a finding.
-- Do NOT pipe code to a runtime (no `echo "..." | python`, no `python -c`, etc.).
-- Do NOT attempt to verify findings by executing code. Static analysis only.
-- If something needs runtime verification, recommend it as a next step in the review.
+- Do NOT modify any source code or tests.
+- Do NOT execute the user's program (no `python -c`, no `node`, no `go run`).
+- Do NOT install or upgrade packages.
+- Do NOT pipe code to a runtime.
 
-Report findings as a structured list with:
-- Severity: critical / important / suggestion / strength
-- Confidence: high / medium
-- File and line reference (file.py:42)
-- Description of the issue
-- Why it matters (grounded in the project's own patterns where possible)
-- Suggested fix (if applicable)
+OUTPUT PROCEDURE — strict:
+1. Construct the full agent_output JSON in your response.
+2. Write it to the OUTPUT PATH (single Write call).
+3. Invoke the validator: `python ~/.claude/skills/review/scripts/validate-findings.py <OUTPUT PATH>`.
+4. If the validator exits non-zero, read its error output, repair the JSON, Write again, validate again.
+5. **Hard cap: 3 attempts total** (1 initial + 2 retries). If the JSON does not validate after 3 attempts, return a structured failure message in your final response: `{"status": "failure", "reason": "<validator output>"}`. Do not return success without a passing validation.
+
+The agent_output schema lives at `~/.claude/skills/review/schemas/agent-output.schema.json`. Read it directly if you need to confirm field names and value constraints.
 ```
 
 ## Critical Rules
 
-- **NEVER modify source code or tests** — this is a review, not a fix
-- **NEVER install dependencies** — if make targets fail due to missing deps, report it
-- **NEVER run the program** — no `python -m`, `node`, `go run`, etc.
-- **NEVER run pip, npm, cargo, etc.** — no package management
-- **NEVER write or execute ad hoc tests** — if a test is missing, report it as a finding. Do not write a test to prove it is missing. Do not execute code to verify a gap — that is what the missing test is for
-- **NEVER pipe code to a runtime** — no `echo "..." | python`, no `python -c "..."`, no equivalent in any language
-- **Read-only agents (2-5) use `subagent_type: "feature-dev:code-reviewer"`** — Write, Edit, and Bash are structurally unavailable via tool restriction, not just prompt prohibition
-- **Build agent (1) runs only make check targets** — no install, build, run, deploy
-- **Prefer allowlisted commands** — agents receive the allowlist as context. Stick to pre-approved commands to avoid blocking the review on user approval prompts. The goal is a hands-off review that runs without user intervention
-- **All findings need file:line references** — no vague complaints
-- **Severity must be justified** — explain why something is critical vs. suggestion
-- **Acknowledge strengths** — a good review recognizes what works well
-- **Only write Review-<project-name>[-<slug>].md and its supplementary file** — never create or modify any other file
-- **Review is observation, not action** — the review identifies findings and gaps for other agents or the user to act on later. Do not attempt to fix, verify, or validate issues beyond reading source code. If something needs verification beyond static analysis, recommend it as a next step in the review
+- **NEVER execute anything against the user's code or environment.** Static analysis only. This single rule subsumes:
+  - No running the user's program (`python -m <module>`, `node`, `go run`, etc.)
+  - No installing or upgrading packages (`pip`, `npm`, `cargo`, etc.)
+  - No piping code to a runtime (`echo "..." | python`, `python -c "..."`, equivalents in any language)
+  - No writing or running ad-hoc test files to "verify" a finding. The presence of a missing test is itself a finding — file it as one. **Anything that would otherwise need a runtime check is a missing test, not a script you write.**
+  - No `make install`, `make build`, `make run`, `make deploy`, or any target that installs or executes the program.
+  - The Build & Checks agent is the only agent allowed to run anything (`make` check targets only — `format`, `lint`, `typecheck`, `test`, `coverage`).
+- **Writes are restricted by tool boundary, not just intent:**
+  - **Concern agents (`general-purpose` subagent_type)** may Write *only* to their pre-assigned `.tmp-review-findings/raw/<concern_slug>-<dimension_slug>.json` path. Any other Write — anywhere on disk, inside or outside the project — is a violation and the agent must stop and report.
+  - **Validation agents (`feature-dev:code-reviewer` subagent_type)** are structurally read-only — they cannot Write at all.
+  - **Main agent** writes only to `.tmp-review-findings/` and the three output files at the project root (`Review-<project-name>[-<slug>].json|.md|-supplementary.md`). No edits anywhere else.
+- **Bash is restricted by tool boundary too:**
+  - **Concern agents:** Bash only to invoke `python ~/.claude/skills/review/scripts/validate-findings.py <their assigned output path>`. No other Bash command is permitted.
+  - **Validation agents:** no Bash (structural).
+  - **Main agent:** Bash limited to the skill's allowlisted scripts (bootstrap, validators, renderer, pre-fetch helpers).
+- **Prefer allowlisted commands** — agents receive the allowlist as context. Stick to pre-approved commands to avoid blocking the review on user approval prompts.
+- **All findings need `finding.locations[]` entries** — the schema enforces this; the validator rejects missing locations.
+- **Acknowledge strengths** — a good review recognizes what works well; the supplementary file has a Strengths section. Sub-agents may note positive patterns in their `cross_cutting_observations` field if they wish to call them out.
+- **Review is observation, not action** — the review identifies findings and gaps for other agents or the user to act on later. If something needs runtime verification, recommend it as a next step in the review.
