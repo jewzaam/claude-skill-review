@@ -1,32 +1,49 @@
 # claude-skill-review
 
-A Claude Code skill that performs multi-agent reviews of an entire codebase — not a branch diff or PR review, but a full assessment of the whole repo.
+A Claude Code skill that performs multi-agent reviews of an entire codebase or a single PR via a JSON-native pipeline with schema-validated agent boundaries.
 
 ## Overview
 
-This skill launches five parallel agents to review a codebase simultaneously:
+The skill spawns one Build & Checks agent plus seven concern-focused review agents per dimension that the main agent identifies. For a typical full-repo review, expect 30–70 parallel agents; for small PRs, expect single-digit counts. Findings are collected as JSON, validated by separate parallel validator agents (≤8 findings each), then rendered to a structured JSON document plus two markdown files at the project root.
 
-- **Build & Checks** — runs available `make` check targets and reports results
-- **Architecture & Design** — evaluates project structure, module boundaries, and design patterns
-- **Implementation Quality** — checks correctness, error handling, type safety, and security
-- **Test Quality & Coverage** — assesses test isolation, assertion quality, and missing scenarios
-- **Maintainability & Standards** — reviews naming, duplication, complexity, and consistency
+The seven concern axes per dimension:
 
-Each agent establishes the project's own patterns first, then assesses against that baseline — findings are grounded in the project's conventions, not abstract ideals. Findings are filtered by confidence scoring and validated by independent subagents before inclusion.
+- **Architecture & Design** — structure, module boundaries, design patterns
+- **Implementation Quality** — correctness, error handling, type safety, resource management
+- **Test Quality & Coverage** — isolation, assertion quality, missing scenarios
+- **Maintainability & Standards** — naming, duplication, complexity, internal consistency
+- **Security** — authn/authz, input validation, injection vectors, secret handling, supply chain
+- **Documentation** — README accuracy, docstrings, examples, ADRs, install/usage instructions
+- **Observability** — log quality, error context, metrics, traces, debug affordances
 
-Output is a single `Review-<project-name>.md` file with prioritized findings (C0, I0, S0 prefixed for easy reference), strengths, and actionable recommendations.
+Each agent establishes the project's own patterns first, then assesses against that baseline — findings are grounded in the project's conventions, not abstract ideals. Each finding is scored on four numerical scales (impact, likelihood, effort_to_fix, confidence) on 0–100; severity buckets are assigned only at the final render step.
+
+## Output
+
+The skill writes three files at the project root for each review:
+
+- `Review-<project-name>[-<slug>].json` — structured findings (severity buckets and IDs assigned at render time). Downstream skills (e.g., apply-review) consume this directly.
+- `Review-<project-name>[-<slug>].md` — main markdown: TL;DR, build & check results, critical and important findings.
+- `Review-<project-name>[-<slug>]-supplementary.md` — strengths, detailed analysis by concern, suggestions, needs-review (low-confidence) items, and the decomposition preamble showing how the work was sliced.
+
+The slug is appended when the scope is constrained (a PR number or focus guidance).
+
+## Severity Buckets
+
+The renderer assigns each finding to one of four buckets based on its numerical scores:
+
+- **Critical** (`C0..`): high impact, high likelihood, high confidence — must fix.
+- **Important** (`I0..`): meaningful impact and confidence — should fix.
+- **Suggestion** (`S0..`): high confidence but lower priority — nice to have.
+- **Needs Review** (`N0..`): low confidence — surfaced for manual triage; downstream automation usually ignores by default.
+
+Thresholds are configurable via `schemas/render-config.default.json`.
 
 ## Dependencies
 
-This skill requires the **feature-dev** Claude Code plugin. Analytical agents (2–5) use `subagent_type: "feature-dev:code-reviewer"` to structurally restrict their available tools to read-only operations (Glob, Grep, Read, etc.) — Bash, Write, and Edit are physically unavailable, not just discouraged by prompt. This is the primary mechanism that enforces the skill's read-only guarantee for code analysis.
-
-Without the plugin installed, agents 2–5 will fail to launch.
-
-The feature-dev plugin is an official Anthropic plugin. Requires Claude Code v2.0 or later (the `/plugin` command is built-in). To install it:
-
-```
-/plugin install feature-dev@claude-plugins-official
-```
+- **feature-dev** Claude Code plugin. Validation agents use `subagent_type: "feature-dev:code-reviewer"` to enforce read-only access structurally. Concern agents use `subagent_type: "general-purpose"` (with prompt-level restrictions) because they need Write and Bash to self-validate their JSON output against the schema.
+  - Install: `/plugin install feature-dev@claude-plugins-official` (requires Claude Code v2.0+).
+- **Python 3.12+** with `jsonschema` available — used by `validate-findings.py` and `render-review.py`. Install dev deps with `make install-dev`.
 
 ## Installation
 
@@ -35,6 +52,7 @@ Clone the repo into your Claude Code skills directory:
 ```bash
 cd ~/.claude/skills/
 git clone git@github.com:jewzaam/claude-skill-review.git review
+cd review && make install-dev
 ```
 
 ## Usage
@@ -43,18 +61,21 @@ Invoke the skill in Claude Code:
 
 ```
 /review
-/review /path/to/project
+/review 565
 /review focus on error handling and test coverage
-/review just the src/api/ directory, I'm worried about input validation
+/review 565 just the src/api/ directory, I'm worried about input validation
 ```
 
-With no arguments, it reviews the entire codebase across all dimensions. Any text after `/review` is passed to the agents as additional context, so you can guide what they pay attention to — but all five agents still run regardless.
+Forms:
+- `/review` — full-repo review across all dimensions the main agent identifies.
+- `/review <PR number>` — diff-scoped review.
+- `/review <PR number> <guidance text>` — diff-scoped + free-form focus.
+- `/review <guidance text>` — full-repo + free-form focus.
 
-The skill is read-only — it never modifies source code, installs dependencies, or runs the program.
+The skill is read-only with respect to source code — it never modifies source files, installs dependencies, or runs the user's program. Concern agents do write JSON to a `.tmp-review-findings/` workspace at the project root (gitignored) for self-validation; that workspace plus the three output files are the only writes the skill performs.
 
 ## Standards reference
 
 For user-owned repos, the skill also checks against coding standards from `~/source/standards/` if that directory exists. Ownership is determined automatically: the skill compares the origin remote's owner against your authenticated GitHub user (`gh api user --jq '.login'`). If they match and `~/source/standards/` exists, the standards are applied.
 
 The [jewzaam/standards](https://github.com/jewzaam/standards/) repo provides a set of language and project conventions designed for use with this skill. Contributions are welcome — if you have standards that would benefit the broader community, open a PR. To use it, clone it to `~/source/standards/`.
-
