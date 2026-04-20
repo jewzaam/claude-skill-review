@@ -52,3 +52,25 @@ class TestBootstrap:
         assert second.returncode == 0, second.stderr
         gitignore = tmp_path / ".tmp-review-findings" / ".gitignore"
         assert gitignore.read_text(encoding="utf-8") == "*"
+
+    def test_wipes_prior_state(self, tmp_path: Path):
+        work = tmp_path / ".tmp-review-findings"
+        work.mkdir()
+        (work / "raw").mkdir()
+        (work / "validation").mkdir()
+        (work / "raw" / "stale.json").write_text('{"old": true}', encoding="utf-8")
+        (work / "validation" / "batch-1-input.json").write_text(
+            '{"old": true}', encoding="utf-8"
+        )
+        (work / "consolidated.json").write_text('{"old": true}', encoding="utf-8")
+
+        result = _run(tmp_path)
+        assert result.returncode == 0, result.stderr
+
+        assert not (work / "raw" / "stale.json").exists()
+        assert not (work / "validation" / "batch-1-input.json").exists()
+        assert not (work / "consolidated.json").exists()
+
+        assert (work / "raw").is_dir()
+        assert (work / "validation").is_dir()
+        assert (work / ".gitignore").read_text(encoding="utf-8") == "*"

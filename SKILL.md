@@ -3,7 +3,30 @@ name: review
 description: Perform a multi-agent codebase review by spinning up parallel review agents across multiple dimensions (1 + 7×N agents per run). Use when the user asks to review, assess, audit, or evaluate a codebase or project. Accepts an optional PR number and/or free-form guidance text to focus the review.
 disable-model-invocation: true
 argument-hint: "[PR-number] [guidance text...]"
-allowed-tools: Bash(git remote -v),Bash(~/.claude/skills/review/scripts/standards-check.sh),Bash(~/.claude/skills/review/scripts/pr-scope.sh *),Bash(~/.claude/skills/review/scripts/guidance.sh *),Bash(~/.claude/skills/review/scripts/bootstrap-findings-dir.sh),Bash(python ~/.claude/skills/review/scripts/validate-findings.py *),Bash(python ~/.claude/skills/review/scripts/render-review.py *)
+allowed-tools:
+  - Bash(git remote -v)
+  - Bash(python ~/.claude/skills/review/scripts/*)
+  - Bash(python */.claude/skills/review/scripts/*)
+  - Bash(make -n *)
+  - Bash(make format)
+  - Bash(make format-check)
+  - Bash(make lint)
+  - Bash(make typecheck)
+  - Bash(make test)
+  - Bash(make test-unit)
+  - Bash(make coverage)
+  - Bash(make complexity)
+  - Bash(ls *)
+  - Bash(test -f *)
+  - Bash(test -d *)
+  - Read(*/.claude/skills/review/**)
+  - Read(*/claude-skill-review/**)
+  - Glob(*/.claude/skills/review/**)
+  - Glob(*/claude-skill-review/**)
+  - Grep(*/.claude/skills/review/**)
+  - Grep(*/claude-skill-review/**)
+  - Write(.tmp-review-findings/raw/**)
+  - Write(*/.tmp-review-findings/raw/**)
 ---
 
 # Review Skill
@@ -35,7 +58,7 @@ Runs `scripts/standards-check.sh`. For user-owned repos (origin owner matches `g
 
 ### Findings Workspace Bootstrap (auto-executed)
 
-Creates `.tmp-review-findings/` at the project root with `raw/`, `validation/`, and a `.gitignore` of `*`. Idempotent — safe to run on every invocation. Sub-agents and the main agent both write JSON into this tree.
+Wipes and recreates `.tmp-review-findings/` at the project root with `raw/`, `validation/`, and a `.gitignore` of `*`. Each `/review` invocation starts from a clean slate so stale findings from a prior run cannot leak into consolidation. Sub-agents and the main agent both write JSON into this tree.
 
 !`~/.claude/skills/review/scripts/bootstrap-findings-dir.sh`
 
@@ -98,7 +121,8 @@ After decomposition produces N dimensions, launch **all `1 + 7×N` agents in a s
 
 - `model: "haiku"`, default subagent_type
 - Runs available `make` check targets sequentially via Bash and reports pass/fail. Prefer commands from the provided allowlist.
-- Safe targets to attempt (skip if missing): `make format` (check mode), `make lint`, `make typecheck`, `make test` or `make test-unit`, `make coverage`.
+- Safe targets to attempt (skip if missing): `make format-check` (or `make format` in check mode), `make lint`, `make typecheck`, `make test` or `make test-unit`, `make coverage`, `make complexity`.
+- **The Build & Checks agent is the only agent that runs anything against the user's project.** Concern agents must not invoke complexity tools (radon, xenon), test runners, or any other analysis tools directly — if a check is worth running, it belongs in a `make` target the Build & Checks agent invokes.
 - Do **not** run `install`, `build`, `run`, `deploy`, or any target that installs or executes the program.
 - **Output guidelines:** summarize failures concisely — error type and affected files, not full stack traces. For missing-dependency failures, state which dependency is missing and move on.
 
@@ -163,30 +187,45 @@ For any file that fails this re-validation, exclude it from consolidation and lo
 
 ### 5. Consolidate
 
-Read every `*.json` under `.tmp-review-findings/raw/`, then build `consolidated.json`:
+Run the consolidator script — it applies the merge rules deterministically and emits a schema-validated `consolidated.json`:
 
-- **Group by `(concern_slug, primary location)`.** The primary location is the first entry in `finding.locations` whose `role` is `primary` (or whose `role` is absent — defaulted to primary).
-- **Within each group, merge:**
-  - Union `finding.locations` (deduplicate by `path` + `line`).
-  - Keep the longest non-trivial `suggested_fix` (tie-break by source agent ordering).
-  - Take the **maximum** of `impact`, `likelihood`, and `confidence` across the group.
-  - Take the **minimum** of `effort_to_fix` (cheapest fix wins).
-  - Set `source_dimensions` = sorted union of contributing `dimension_slug` values.
-  - Compute `content_hash` = stable hex hash (e.g., truncated SHA-256, 16+ chars) over `(concern_slug, dimension_slug of first contributor, primary location path:line, title)`.
-- **Cross-cutting merge.** Within a single `concern_slug`, group remaining findings by title similarity (Jaccard over title tokens, threshold ~0.7) and merge near-duplicates with the same numerical aggregation rules.
-- **Do NOT assign IDs.** Do NOT assign severity buckets.
-- Validate the result: `python ~/.claude/skills/review/scripts/validate-findings.py .tmp-review-findings/consolidated.json`.
+```
+python ~/.claude/skills/review/scripts/consolidate-findings.py \
+  --raw-dir .tmp-review-findings/raw/ \
+  --output .tmp-review-findings/consolidated.json \
+  --project-name <project name> \
+  --scope-slug <slug if PR-number or guidance constrained scope, else omit>
+```
 
-The consolidated `decomposition` field copies the dimension list you produced in step 2.
+What the script does (you do **not** re-implement this in your reasoning):
+
+- **Pass 1: group by `(concern_slug, primary location)`.** Primary location is the first entry in `finding.locations` whose `role` is `primary` (or absent — defaulted to primary). Within each group: union `locations` (dedup by `path` + `line`), keep the longest non-trivial `suggested_fix` (tie-break by `dimension_slug`), take **max** of `impact`/`likelihood`/`confidence`, **min** of `effort_to_fix`, sorted union of `dimension_slug` → `source_dimensions`.
+- **Pass 2: cross-cutting merge.** Within the same `concern_slug`, group remaining findings by title similarity (Jaccard over lowercased alphanumeric tokens, default threshold 0.7) and merge near-duplicates using the same numerical aggregation.
+- **Content hash.** Each merged finding gets a 16-char hex SHA-256 prefix over `(concern_slug, dimension_slug of first contributor, primary location path:line, title)`.
+- **Decomposition.** Built from the per-agent `dimension_name`/`dimension_slug`/`dimension_scope`, deduplicated by `dimension_slug`.
+- **No IDs. No severity buckets.** Both are assigned only at render time.
+- Output is validated against `consolidated.schema.json` before writing; the script exits non-zero on any validation error.
+
+If a `raw/*.json` file fails its agent-output schema validation, the consolidator skips it with a warning on stderr and continues. Note any skipped files in the supplementary "Decomposition" preamble at render time.
 
 ### 6. Validate Findings
 
-Slice `consolidated.json` into batches:
+Run the batcher script — it slices `consolidated.json` into validation-input batches and self-validates each against the schema:
 
-- Sort `consolidated.findings` by `priority` (= `impact * likelihood / 100`) descending.
-- Slice into batches of **at most 8 findings** each.
-- For each batch, write `.tmp-review-findings/validation/batch-<N>-input.json` containing `{batch_number, total_batches, findings: [...]}`. Each finding object also carries its `index` (its position in `consolidated.findings`) so the validator can reference it back.
-- Validate each input file: `python ~/.claude/skills/review/scripts/validate-findings.py .tmp-review-findings/validation/batch-<N>-input.json`.
+```
+python ~/.claude/skills/review/scripts/batch-findings.py \
+  --input .tmp-review-findings/consolidated.json \
+  --output-dir .tmp-review-findings/validation/
+```
+
+What the script does (you do **not** re-implement this in your reasoning):
+
+- Sorts findings by `priority` (= `impact * likelihood / 100`) descending; deterministic tie-break on `content_hash`.
+- Slices into batches of at most **8** findings each (the spec's hard cap; `--batch-size` overrides but cannot exceed 8).
+- Writes `batch-<N>-input.json` per batch containing `{batch_number, total_batches, findings: [...]}`.
+- Each batch finding's `index` field is its **original position in `consolidated.findings`** — verdict application uses `consolidated.findings[verdict.finding_ref.index]`. Sorting does NOT renumber it.
+- Strips fields not in the validation-input schema (e.g. `source_dimensions`).
+- Validates every batch against `validation-input.schema.json` before writing; exits non-zero on any failure.
 
 Spawn `total_batches` validator agents in **parallel** in a single message:
 
@@ -251,7 +290,8 @@ TOOL RESTRICTIONS — strictly enforced:
 - Write: only to the OUTPUT PATH above. Any Write elsewhere is a violation; stop and report.
 - Bash: only to invoke `python ~/.claude/skills/review/scripts/validate-findings.py <OUTPUT PATH>`. No other Bash usage is permitted.
 - Edit, NotebookEdit, or any other state-modifying tool: prohibited.
-- Read, Glob, Grep, LS, NotebookRead, WebFetch, TodoWrite, WebSearch: allowed.
+- TaskCreate, TaskUpdate, TodoWrite, and other task-tracking tools: do NOT use them. Your scope is narrow (one concern × one dimension); track progress inline in your own reasoning — there is no multi-step plan worth persisting, and these tools' schemas are deferred so calls will fail on first attempt and waste context.
+- For reading and searching, use Read, Glob, Grep, LS as needed. Other tools (WebFetch, WebSearch, etc.) are available but rarely useful for in-scope review work.
 
 PROJECT CONTEXT:
 - Language: <detected>
@@ -272,20 +312,26 @@ Read enough code in scope to understand the project's existing conventions for t
 Phase 2 — Assess against baseline:
 Evaluate whether the codebase follows its own patterns consistently. Flag deviations, gaps, and concrete issues. For each finding, fill all required fields per the agent-output schema.
 
-SCORING — every finding requires four integer scores (0–100):
-- impact: blast radius if the issue manifests
-- likelihood: probability the issue actually occurs in real use
-- effort_to_fix: lower = cheaper to fix
-- confidence: your certainty this is a real issue with concrete evidence
+FINDING SCHEMA — every finding object MUST contain exactly these fields. Use these field names verbatim — do NOT invent alternatives like `description`, `details`, `severity`, `id`, etc. (the schema rejects unknown fields):
+
+- `title`: short summary, ≤120 chars
+- `impact`: integer 0–100, blast radius if the issue manifests
+- `likelihood`: integer 0–100, probability the issue actually occurs in real use
+- `effort_to_fix`: integer 0–100, lower = cheaper to fix
+- `confidence`: integer 0–100, your certainty this is a real issue with concrete evidence
+- `locations`: non-empty array of `{path, line, role?}` objects (see LOCATIONS below)
+- `issue`: 1–3 sentence prose description of the problem
+- `why_it_matters`: prose grounding the finding in the project's own patterns or stated standards
+- `suggested_fix`: prose describing the recommended change
 
 Do NOT drop low-confidence findings. Validators downstream may rescore; the render step segregates low-confidence items into a `needs-review` bucket.
 
 The `agent_output` schema does not include `severity` or `id` fields — do not invent them. The render step assigns both from your numerical scores.
 
-LOCATIONS — every finding requires at least one entry:
-- Use file:line or file:line-range under finding.locations[].path / .line.
-- For "X is missing" findings, cite the spec/plan/standards file:line where the requirement is stated, with role: "requirement".
-- Multiple locations are allowed; mark non-primary entries with role: "related" | "callsite" | "requirement".
+LOCATIONS — every finding requires at least one entry in `locations`:
+- Use file:line or file:line-range under `locations[].path` / `locations[].line`.
+- For "X is missing" findings, cite the spec/plan/standards file:line where the requirement is stated, with `role: "requirement"`.
+- Multiple locations are allowed; mark non-primary entries with `role: "related" | "callsite" | "requirement"`.
 
 HARD EXCLUSIONS — never report:
 - Style issues already enforced by linters/formatters
@@ -304,7 +350,7 @@ PROHIBITED ACTIONS:
 OUTPUT PROCEDURE — strict:
 1. Construct the full agent_output JSON in your response.
 2. Write it to the OUTPUT PATH (single Write call).
-3. Invoke the validator: `python ~/.claude/skills/review/scripts/validate-findings.py <OUTPUT PATH>`.
+3. Invoke the validator: `python ~/.claude/skills/review/scripts/validate-findings.py <OUTPUT PATH>`. Use whatever path form your environment naturally provides (`~/`, `/c/Users/.../`, Windows-native) — the user's settings.json should permit all forms via wildcard prefix patterns. If the call is denied, abort and report the failure rather than retrying with permutations.
 4. If the validator exits non-zero, read its error output, repair the JSON, Write again, validate again.
 5. **Hard cap: 3 attempts total** (1 initial + 2 retries). If the JSON does not validate after 3 attempts, return a structured failure message in your final response: `{"status": "failure", "reason": "<validator output>"}`. Do not return success without a passing validation.
 

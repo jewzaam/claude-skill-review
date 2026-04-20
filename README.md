@@ -55,6 +55,39 @@ git clone git@github.com:jewzaam/claude-skill-review.git review
 cd review && make install-dev
 ```
 
+## Required permissions
+
+The skill ships an `allowed-tools` list in `SKILL.md`'s frontmatter, but **not all Claude Code install modes propagate frontmatter permissions to sub-agents** — symlinked dev installs in particular do not. Without the rules below in `~/.claude/settings.json` (or `<project>/.claude/settings.local.json`), the skill dispatches its 1+7×N agents and they all silently fail mid-run on Write/Bash permission walls.
+
+Copy this into your settings file:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Write(.tmp-review-findings/raw/**)",
+      "Write(*/.tmp-review-findings/raw/**)",
+      "Bash(*/.claude/skills/review/scripts/standards-check.sh)",
+      "Bash(*/.claude/skills/review/scripts/pr-scope.sh *)",
+      "Bash(*/.claude/skills/review/scripts/guidance.sh *)",
+      "Bash(*/.claude/skills/review/scripts/bootstrap-findings-dir.sh)",
+      "Bash(python */.claude/skills/review/scripts/validate-findings.py *)",
+      "Bash(python */.claude/skills/review/scripts/consolidate-findings.py *)",
+      "Bash(python */.claude/skills/review/scripts/batch-findings.py *)",
+      "Bash(python */.claude/skills/review/scripts/render-review.py *)",
+      "Read(*/.claude/skills/review/**)",
+      "Read(*/claude-skill-review/**)",
+      "Glob(*/.claude/skills/review/**)",
+      "Glob(*/claude-skill-review/**)",
+      "Grep(*/.claude/skills/review/**)",
+      "Grep(*/claude-skill-review/**)"
+    ]
+  }
+}
+```
+
+The `*/` wildcard prefix handles `~/`, `/c/Users/.../`, and Windows-native path forms uniformly (see `~/source/standards/claude-code/skills.md` for the convention). The `*/claude-skill-review/**` lines are the symlink-target form — drop them once the skill ships via the plugin marketplace.
+
 ## Usage
 
 Invoke the skill in Claude Code:

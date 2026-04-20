@@ -28,10 +28,24 @@ KNOWN_SCHEMAS = {
 
 
 def detect_schema(input_path: Path) -> str | None:
+    """Detect schema by filename first (fixtures, explicit naming), then by
+    parent directory (live pipeline files under .tmp-review-findings/)."""
     stem = input_path.name
     for known in KNOWN_SCHEMAS:
         if stem.startswith(known + ".") or stem == f"{known}.json":
             return known
+
+    parent = input_path.parent.name
+    if parent == "raw":
+        # Sub-agent output files live at .tmp-review-findings/raw/<concern>-<dim>.json
+        return "agent-output"
+    if parent == "validation":
+        # Validation batches: validation/batch-N-{input,output}.json
+        if stem.endswith("-input.json"):
+            return "validation-input"
+        if stem.endswith("-output.json"):
+            return "validation-output"
+
     return None
 
 
